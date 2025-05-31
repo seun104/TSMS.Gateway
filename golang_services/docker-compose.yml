@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine # Using PostgreSQL 15 on Alpine Linux for a smaller image
+    container_name: aradsms_postgres_dev
+    environment:
+      POSTGRES_USER: smsuser
+      POSTGRES_PASSWORD: smspassword # Use a more secure password in real dev, consider .env file
+      POSTGRES_DB: sms_gateway_db
+    ports:
+      - "5432:5432" # Expose PostgreSQL on the host machine's port 5432
+    volumes:
+      - postgres_data:/var/lib/postgresql/data # Persist PostgreSQL data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smsuser -d sms_gateway_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.9-alpine # Using NATS 2.9 on Alpine
+    container_name: aradsms_nats_dev
+    ports:
+      - "4222:4222"  # NATS client port
+      - "8222:8222"  # HTTP monitoring port
+      - "6222:6222"  # Routing port for clustering (optional for local dev)
+    command: "-js"   # Start NATS server with JetStream enabled
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nats server check"] # Basic check, nats-server-healthcheck is better if available in image
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Placeholder for a Go service, e.g., user_service
+  # user_service:
+  #   build:
+  #     context: . # Assuming Dockerfile is in golang_services/ or specific service dir
+  #     dockerfile: cmd/user_service/Dockerfile # Path to the Dockerfile for the service
+  #   container_name: aradsms_user_service_dev
+  #   ports:
+  //  # - "8080:8080" # Example port mapping if it's an HTTP service
+  #   environment:
+  #     - APP_LOG_LEVEL=debug
+  #     - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+  #     - APP_NATS_URL=nats://nats:4222
+  #     # Add other necessary environment variables
+  #   depends_on:
+  //  # - postgres
+  //  # - nats
+  #   restart: unless-stopped
+  #   volumes:
+  #     # For live reload in development, mount the source code
+  #     # This is optional and depends on your Go development workflow (e.g., using Air for live reload)
+  //   # - ./cmd/user_service:/app/cmd/user_service
+  //   # - ./internal/user_service:/app/internal/user_service
+  //   # - ./internal/platform:/app/internal/platform
+  //   # - ./go.mod:/app/go.mod
+  //   # - ./go.sum:/app/go.sum
+
+volumes:
+  postgres_data: # Defines a named volume for persisting PostgreSQL data
+
+# Networks can be defined if more complex networking is needed,
+# but Docker Compose creates a default network for all services in this file.
+# networks:
+#   aradsms_net:
+#     driver: bridge

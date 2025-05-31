@@ -1,0 +1,14 @@
+# Default application configuration
+# Environment variables will override these values if set.
+# Example: export APP_SERVER_PORT=9090
+
+SERVER_PORT: 8080
+LOG_LEVEL: "info" # e.g., debug, info, warn, error
+
+# NATS_URL: "nats://localhost:4222"
+# POSTGRES_DSN: "postgres://user:password@localhost:5432/sms_gateway_db?sslmode=disable"
+
+# Example for a specific service like user_service
+# user_service:
+#   jwt_secret: "your_jwt_secret_key_env_override" # MUST be overridden by env var
+#   token_expiry_hours: 24
