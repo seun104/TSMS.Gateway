@@ -18,8 +18,8 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Configuration loading (Viper setup). (`internal/platform/config/config.go`, `configs/config.defaults.yaml`)
     *   [x] Structured logging (Logrus, Zap, or slog setup). (`internal/platform/logger/logger.go` with slog)
     *   [ ] Basic error handling utilities. (To be done within services or a future platform addition)
-    *   [x] PostgreSQL connection manager (`pgxpool` wrapper). (Placeholder created: `internal/platform/database/postgres.go`)
-    *   [x] NATS client wrapper (connection, basic pub/sub helpers). (Placeholder created: `internal/platform/messagebroker/nats.go`)
+    *   [x] PostgreSQL connection manager (`pgxpool` wrapper). (Implemented in `internal/platform/database/postgres.go`)
+    *   [x] NATS client wrapper (connection, basic pub/sub helpers). (Implemented in `internal/platform/messagebroker/nats.go`)
 *   [x] **CI/CD Pipeline (Initial):**
     *   [ ] Setup CI server (GitHub Actions, GitLab CI, Jenkins). (Beyond direct file creation)
     *   [x] Basic pipeline: lint, test, build Go binary for a sample service. (Placeholder created: `scripts/ci_pipeline_placeholder.yml`)
@@ -28,35 +28,42 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Docker Compose setup for PostgreSQL, NATS, (optional: Jaeger, Prometheus, Grafana). (`docker-compose.yml` created for PG & NATS)
     *   [ ] Define Makefiles or scripts for common dev tasks (build, test, run, lint). (Future task)
 *   [x] **Database Setup:**
-    *   [ ] Install and configure PostgreSQL for local development. (Handled by Docker Compose)
-    *   [x] Setup database migration tool (`golang-migrate/migrate` or similar). (Directory `migrations/` and placeholder files created)
+    *   [x] Install and configure PostgreSQL for local development. (Handled by Docker Compose)
+    *   [x] Setup database migration tool (`golang-migrate/migrate` or similar). (Directory `migrations/` and placeholder files created, including auth tables migration)
 
 ## Phase 1: Core Services & Authentication
 
-*   [ ] **User Service (`user-service`):**
-    *   [ ] Define `User`, `Role`, `Permission` domain models (Go structs).
-    *   [ ] Implement PostgreSQL schema & migrations for users, roles, permissions, role_permissions, refresh_tokens.
-    *   [ ] Implement `UserRepository` for CRUD operations.
-    *   [ ] Implement password hashing (e.g., bcrypt).
-    *   [ ] Implement user registration logic.
-    *   [ ] Implement user login logic (issue JWTs).
-    *   [ ] Implement JWT validation & refresh token logic.
-    *   [ ] Implement API key generation and validation logic.
-    *   [ ] Implement basic role and permission management logic.
-    *   [ ] Define gRPC interface for internal authentication/authorization checks.
-*   [ ] **Public API Service (`public-api-service`):**
-    *   [ ] Setup HTTP server (e.g., Gin, Chi, or `net/http`).
-    *   [ ] Implement authentication middleware (JWT & API Key validation, calls `user-service` via gRPC).
-    *   [ ] Implement authorization middleware (basic RBAC checks based on context from auth middleware).
-    *   [ ] Implement `/user/login` endpoint (proxies to `user-service`).
-    *   [ ] Implement `/user/info` endpoint (protected).
-    *   [ ] Implement `/user/credit` endpoint placeholder (protected).
-*   [ ] **NATS Integration (Basic):**
-    *   [ ] Connect services (`public-api-service`, `user-service`) to NATS.
-    *   [ ] Implement simple publish/subscribe for a test event.
+*   [x] **User Service (`user-service`):**
+    *   [x] Define `User`, `Role`, `Permission`, `RefreshToken` domain models (Go structs). (`internal/user_service/domain/user.go`)
+    *   [x] Implement PostgreSQL schema & migrations for users, roles, permissions, role_permissions, refresh_tokens. (`migrations/000002_create_auth_tables.up.sql`)
+    *   [x] Implement `UserRepository` for CRUD operations. (Key methods implemented in `repository/postgres/user_repository_pg.go`, skeletons for others)
+    *   [x] Implement password hashing (e.g., bcrypt). (In `app/auth_service.go`)
+    *   [x] Implement user registration logic. (In `app/auth_service.go`)
+    *   [x] Implement user login logic (issue JWTs). (In `app/auth_service.go`)
+    *   [x] Implement JWT validation & refresh token logic. (Initial logic in `app/auth_service.go`, refresh token part needs more robust implementation for rotation/storage)
+    *   [x] Implement API key generation and validation logic. (Initial logic in `app/auth_service.go`)
+    *   [x] Implement basic role and permission management logic. (In `app/auth_service.go`)
+    *   [x] Define gRPC interface for internal authentication/authorization checks. (`api/proto/userservice/auth.proto`)
+    *   [x] Implement gRPC server for `AuthServiceInternal`. (`internal/user_service/adapters/grpc/server.go` and `cmd/user_service/main.go` updated)
+*   [x] **Public API Service (`public-api-service`):**
+    *   [x] Setup HTTP server (e.g., Gin, Chi, or `net/http`). (`cmd/public_api_service/main.go` with Chi)
+    *   [x] Implement authentication middleware (JWT & API Key validation, calls `user-service` via gRPC). (`internal/public_api_service/middleware/auth_middleware.go`)
+    *   [x] Implement authorization middleware (basic RBAC checks based on context from auth middleware). (Placeholder in `auth_middleware.go`)
+    *   [x] Implement `/auth/register`, `/auth/login`, `/auth/refresh_token` endpoints (proxies to `user-service`). (`internal/public_api_service/transport/http/auth_handler.go` - uses simulated gRPC calls pending proto update)
+    *   [x] Implement `/users/me` endpoint (protected). (In `transport/http/auth_handler.go` and `cmd/public_api_service/main.go`)
+    *   [ ] Implement `/user/credit` endpoint placeholder (protected). (To Do)
+*   [x] **NATS Integration (Basic Test):**
+    *   [x] Connect services (`public-api-service`, `user-service`) to NATS. (`main.go` files updated)
+    *   [x] Implement simple publish/subscribe for a test event. (`user-service` publishes on register, `public-api-service` subscribes and logs)
+*   [~] **Testing (Unit & Basic Integration):** (Partially Done)
+    *   [x] Write unit tests for HTTP handlers in `public-api-service` (placeholder with mock gRPC client created).
+    *   [x] Write unit tests for NATS publishing logic in `user-service` (placeholder with mock NATS client created).
+    *   [ ] Write basic integration tests for:
+        *   [ ] `public-api-service` endpoint -> gRPC call to `user-service`.
+        *   [ ] `user-service` NATS publish -> Test NATS subscriber receive.
 
 ## Phase 2: Core SMS Functionality
-
+(All items below are [ ])
 *   [ ] **PostgreSQL Schema & Migrations (SMS Core):**
     *   [ ] `outbox_messages`, `inbox_messages` tables.
     *   [ ] `sms_providers`, `private_numbers`, `routes` tables.
@@ -85,7 +92,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [ ] Implement `GET /messages/{message_id}` endpoint (reads from `outbox_messages`).
 
 ## Phase 3: Delivery Reports & Incoming SMS
-
+(All items below are [ ])
 *   [ ] **Delivery Retrieval Service (`delivery-retrieval-service`):**
     *   [ ] Logic to poll providers (for the one implemented) for delivery reports (if applicable).
     *   [ ] Implement cron job for periodic polling.
@@ -104,7 +111,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [ ] Associate with user/private number.
 
 ## Phase 4: Phonebook & Advanced Features
-
+(All items below are [ ])
 *   [ ] **Phonebook Service (`phonebook-service`):**
     *   [ ] Define `Phonebook`, `Contact` domain models.
     *   [ ] Implement PostgreSQL schema & migrations for `phonebooks`, `contacts`, `phonebook_contacts`.
@@ -138,7 +145,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [ ] Integrate content filtering (using `filter_words`) into `sms-sending-service`.
 
 ## Phase 5: Observability, Testing & Deployment Prep
-
+(All items below are [ ])
 *   [ ] **Logging (Service-wide):**
     *   [ ] Ensure consistent structured logging in all services.
     *   [ ] Integrate with centralized logging platform (e.g., ELK, Loki).
