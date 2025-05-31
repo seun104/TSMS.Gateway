@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package userservice;
+
+option go_package = "github.com/aradsms/golang_services/api/proto/userservice"; // Adjust to your go module path
+
+import "google/protobuf/timestamp.proto";
+
+message ValidateTokenRequest {
+    string token = 1;
+}
+
+message ValidatedUserResponse {
+    string user_id = 1;
+    string username = 2;
+    string role_id = 3;
+    bool is_admin = 4;
+    repeated string permissions = 5; // List of permission names
+    bool is_active = 6;
+}
+
+message GetUserPermissionsRequest {
+    string user_id = 1;
+}
+
+message GetUserPermissionsResponse {
+    repeated string permissions = 1; // List of permission names
+}
+
+// Service definition for authentication and authorization checks
+service AuthServiceInternal {
+    // Validates a token (e.g., JWT or API Key) and returns user details if valid
+    rpc ValidateToken(ValidateTokenRequest) returns (ValidatedUserResponse);
+
+    // Retrieves all permissions for a given user
+    rpc GetUserPermissions(GetUserPermissionsRequest) returns (GetUserPermissionsResponse);
+}

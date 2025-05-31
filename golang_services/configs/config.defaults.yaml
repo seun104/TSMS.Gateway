@@ -1,14 +1,23 @@
 # Default application configuration
-# Environment variables will override these values if set.
-# Example: export APP_SERVER_PORT=9090
+# Environment variables (prefixed with APP_) will override these values if set.
+# Example: export APP_USER_SERVICE_GRPC_PORT=50052
 
-SERVER_PORT: 8080
 LOG_LEVEL: "info" # e.g., debug, info, warn, error
+POSTGRES_DSN: "postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable" # Matches docker-compose service name
+NATS_URL: "nats://nats:4222" # Matches docker-compose service name
 
-# NATS_URL: "nats://localhost:4222"
-# POSTGRES_DSN: "postgres://user:password@localhost:5432/sms_gateway_db?sslmode=disable"
+# User Service
+USER_SERVICE_GRPC_PORT: 50051
+JWT_ACCESS_SECRET: "your_very_secret_access_key_env_override_in_prod_12345" # MUST BE OVERRIDDEN BY ENV
+JWT_REFRESH_SECRET: "your_very_secret_refresh_key_env_override_in_prod_67890" # MUST BE OVERRIDDEN BY ENV
+JWT_ACCESS_EXPIRY_HOURS: 1
+JWT_REFRESH_EXPIRY_HOURS: 720 # 30 days
 
-# Example for a specific service like user_service
+# Public API Service
+PUBLIC_API_SERVICE_PORT: 8080
+USER_SERVICE_GRPC_CLIENT_TARGET: "user-service:50051" # Internal K8s/Docker Compose DNS name for user-service
+
+# Example for a specific service (if not using global APP_ prefix for all)
 # user_service:
-#   jwt_secret: "your_jwt_secret_key_env_override" # MUST be overridden by env var
+#   jwt_secret: "your_jwt_secret_key_env_override"
 #   token_expiry_hours: 24
