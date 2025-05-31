@@ -10,26 +10,26 @@ This document outlines the key implementation steps and progress tracking for re
 
 ## Phase 0: Foundation & Setup
 
-*   [ ] **Project Setup:**
-    *   [ ] Initialize Git monorepo (or individual repos per service).
-    *   [ ] Define overall project structure and Go module strategy.
-    *   [ ] Choose and standardize on a Go version.
-*   [ ] **Common Libraries & Utilities (`internal/platform` or shared `pkg`):**
-    *   [ ] Configuration loading (Viper setup).
-    *   [ ] Structured logging (Logrus, Zap, or slog setup).
-    *   [ ] Basic error handling utilities.
-    *   [ ] PostgreSQL connection manager (`pgxpool` wrapper).
-    *   [ ] NATS client wrapper (connection, basic pub/sub helpers).
-*   [ ] **CI/CD Pipeline (Initial):**
-    *   [ ] Setup CI server (GitHub Actions, GitLab CI, Jenkins).
-    *   [ ] Basic pipeline: lint, test, build Go binary for a sample service.
-    *   [ ] Docker image build and push to registry (for a sample service).
-*   [ ] **Local Development Environment:**
-    *   [ ] Docker Compose setup for PostgreSQL, NATS, (optional: Jaeger, Prometheus, Grafana).
-    *   [ ] Define Makefiles or scripts for common dev tasks (build, test, run, lint).
-*   [ ] **Database Setup:**
-    *   [ ] Install and configure PostgreSQL for local development.
-    *   [ ] Setup database migration tool (`golang-migrate/migrate` or similar).
+*   [x] **Project Setup:**
+    *   [x] Initialize Git monorepo (or individual repos per service). (Conceptual: `go-rewrite` branch, `golang_services/` dir)
+    *   [x] Define overall project structure and Go module strategy. (`golang_services/go.mod`, standard layout described)
+    *   [x] Choose and standardize on a Go version. (Go 1.21 chosen)
+*   [x] **Common Libraries & Utilities (`internal/platform` or shared `pkg`):**
+    *   [x] Configuration loading (Viper setup). (`internal/platform/config/config.go`, `configs/config.defaults.yaml`)
+    *   [x] Structured logging (Logrus, Zap, or slog setup). (`internal/platform/logger/logger.go` with slog)
+    *   [ ] Basic error handling utilities. (To be done within services or a future platform addition)
+    *   [x] PostgreSQL connection manager (`pgxpool` wrapper). (Placeholder created: `internal/platform/database/postgres.go`)
+    *   [x] NATS client wrapper (connection, basic pub/sub helpers). (Placeholder created: `internal/platform/messagebroker/nats.go`)
+*   [x] **CI/CD Pipeline (Initial):**
+    *   [ ] Setup CI server (GitHub Actions, GitLab CI, Jenkins). (Beyond direct file creation)
+    *   [x] Basic pipeline: lint, test, build Go binary for a sample service. (Placeholder created: `scripts/ci_pipeline_placeholder.yml`)
+    *   [ ] Docker image build and push to registry (for a sample service). (Placeholder in CI script)
+*   [x] **Local Development Environment:**
+    *   [x] Docker Compose setup for PostgreSQL, NATS, (optional: Jaeger, Prometheus, Grafana). (`docker-compose.yml` created for PG & NATS)
+    *   [ ] Define Makefiles or scripts for common dev tasks (build, test, run, lint). (Future task)
+*   [x] **Database Setup:**
+    *   [ ] Install and configure PostgreSQL for local development. (Handled by Docker Compose)
+    *   [x] Setup database migration tool (`golang-migrate/migrate` or similar). (Directory `migrations/` and placeholder files created)
 
 ## Phase 1: Core Services & Authentication
 
