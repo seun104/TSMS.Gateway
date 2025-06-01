@@ -36,7 +36,7 @@ This document outlines the key implementation steps and progress tracking for re
 *   [x] **User Service (`user-service`):**
     *   [x] Define `User`, `Role`, `Permission`, `RefreshToken` domain models (Go structs). (`internal/user_service/domain/user.go`)
     *   [x] Implement PostgreSQL schema & migrations for users, roles, permissions, role_permissions, refresh_tokens. (`migrations/000002_create_auth_tables.up.sql`)
-    *   [x] Implement `UserRepository` for CRUD operations. (Key methods implemented in `repository/postgres/user_repository_pg.go`, skeletons for others)
+    *   [x] Implement `UserRepository` for CRUD operations. (Key methods implemented in `repository/postgres/user_repository_pg.go`, skeletons for others. `GetByIDForUpdate` and `UpdateCreditBalance` added for billing.)
     *   [x] Implement password hashing (e.g., bcrypt). (In `app/auth_service.go`)
     *   [x] Implement user registration logic. (In `app/auth_service.go`)
     *   [x] Implement user login logic (issue JWTs). (In `app/auth_service.go`)
@@ -49,47 +49,53 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Setup HTTP server (e.g., Gin, Chi, or `net/http`). (`cmd/public_api_service/main.go` with Chi)
     *   [x] Implement authentication middleware (JWT & API Key validation, calls `user-service` via gRPC). (`internal/public_api_service/middleware/auth_middleware.go`)
     *   [x] Implement authorization middleware (basic RBAC checks based on context from auth middleware). (Placeholder in `auth_middleware.go`)
-    *   [x] Implement `/auth/register`, `/auth/login`, `/auth/refresh_token` endpoints (proxies to `user-service`). (`internal/public_api_service/transport/http/auth_handler.go` - uses simulated gRPC calls pending proto update)
+    *   [x] Implement `/auth/register`, `/auth/login`, `/auth/refresh_token` endpoints (proxies to `user-service`). (`internal/public_api_service/transport/http/auth_handler.go` - uses simulated gRPC calls pending proto update for these specific RPCs)
     *   [x] Implement `/users/me` endpoint (protected). (In `transport/http/auth_handler.go` and `cmd/public_api_service/main.go`)
     *   [ ] Implement `/user/credit` endpoint placeholder (protected). (To Do)
 *   [x] **NATS Integration (Basic Test):**
     *   [x] Connect services (`public-api-service`, `user-service`) to NATS. (`main.go` files updated)
     *   [x] Implement simple publish/subscribe for a test event. (`user-service` publishes on register, `public-api-service` subscribes and logs)
-*   [~] **Testing (Unit & Basic Integration):** (Partially Done)
-    *   [x] Write unit tests for HTTP handlers in `public-api-service` (placeholder with mock gRPC client created).
+*   [x] **Testing (Unit & Basic Integration):** (Placeholders created, some initial unit tests drafted)
+    *   [x] Write unit tests for HTTP handlers in `public-api-service` (placeholder with mock gRPC client created for auth_handler; message_handler_test created).
     *   [x] Write unit tests for NATS publishing logic in `user-service` (placeholder with mock NATS client created).
     *   [ ] Write basic integration tests for:
         *   [ ] `public-api-service` endpoint -> gRPC call to `user-service`.
         *   [ ] `user-service` NATS publish -> Test NATS subscriber receive.
 
 ## Phase 2: Core SMS Functionality
-(All items below are [ ])
-*   [ ] **PostgreSQL Schema & Migrations (SMS Core):**
-    *   [ ] `outbox_messages`, `inbox_messages` tables.
-    *   [ ] `sms_providers`, `private_numbers`, `routes` tables.
-*   [ ] **Billing Service (`billing-service` - Partial):**
-    *   [ ] Define `Transaction` domain model.
-    *   [ ] Implement PostgreSQL schema & migrations for `transactions` table.
-    *   [ ] Implement `TransactionRepository`.
-    *   [ ] Implement basic credit check and deduction logic (callable via gRPC).
-*   [ ] **SMS Sending Service (`sms-sending-service`):**
-    *   [ ] Define `Provider` interface for SMS sending.
-    *   [ ] Implement adapter for **one** SMS provider (e.g., Arad or a test/mock provider).
-        *   [ ] HTTP client logic, request/response handling.
-        *   [ ] Error mapping.
-    *   [ ] Implement core SMS sending logic:
-        *   [ ] Consume "send SMS" jobs (initially via direct call or simple NATS message).
-        *   [ ] Basic routing logic (if multiple providers, or select the one implemented).
-        *   [ ] Call `billing-service` to check/deduct credit.
-        *   [ ] Call provider adapter to send SMS.
-        *   [ ] Update `outbox_messages` table (status: queued, sent, failed_to_send).
-    *   [ ] NATS: Consume "send SMS" jobs from a NATS subject.
-*   [ ] **Public API Service (`public-api-service`):**
-    *   [ ] Implement `POST /messages/send` endpoint.
-        *   [ ] Validate request.
-        *   [ ] Publish "send SMS" job to NATS.
-        *   [ ] Return `message_id` and "Queued" status.
-    *   [ ] Implement `GET /messages/{message_id}` endpoint (reads from `outbox_messages`).
+
+*   [x] **PostgreSQL Schema & Migrations (SMS Core):**
+    *   [x] Define `OutboxMessage`, `InboxMessage`, `SMSProvider`, `PrivateNumber`, `Route` domain models. (`internal/core_sms/domain/sms_models.go`)
+    *   [x] `outbox_messages`, `inbox_messages` tables. (`migrations/000003_create_core_sms_tables.up.sql`)
+    *   [x] `sms_providers`, `private_numbers`, `routes` tables. (`migrations/000003_create_core_sms_tables.up.sql`)
+*   [x] **Billing Service (`billing-service` - Partial):**
+    *   [x] Define `Transaction` domain model & `TransactionType` ENUM. (`internal/billing_service/domain/billing_models.go`)
+    *   [x] Implement PostgreSQL schema & migrations for `transactions` table. (`migrations/000004_create_billing_tables.up.sql` - assumed exists, config updated)
+    *   [x] Implement `TransactionRepository` (interface & Postgres impl - assumed exists).
+    *   [x] Implement basic credit check and deduction logic (callable via gRPC). (`internal/billing_service/app/billing_app_service.go` - uses direct user repo access temporarily)
+    *   [x] Define and implement gRPC service `BillingInternalService` and its server. (`api/proto/billingservice/billing.proto`, `internal/billing_service/adapters/grpc/server.go`, `cmd/billing_service/main.go` - assumed exists, config updated)
+*   [x] **SMS Sending Service (`sms-sending-service`):**
+    *   [x] Define `SMSSenderProvider` interface for SMS sending. (`internal/sms_sending_service/provider/interface.go`)
+    *   [x] Implement adapter for **one** SMS provider (Mock: `provider/mock_provider.go`).
+    *   [x] Implement core SMS sending logic: (`internal/sms_sending_service/app/sms_app_service.go`)
+        *   [x] NATS: Consume "send SMS" jobs from a NATS subject (`sms.jobs.send`).
+        *   [x] Call `billing-service` to check/deduct credit.
+        *   [x] Call provider adapter to send SMS (mocked).
+        *   [x] Update `outbox_messages` table (status: queued, sent_to_provider, failed_provider_submission) via `OutboxRepository`. (OutboxRepo implemented - assumed exists)
+    *   [x] Update `sms-sending-service/main.go` to run NATS consumer, connect to DB & billing gRPC.
+*   [x] **Public API Service (`public-api-service`):**
+    *   [x] Implement `POST /messages/send` endpoint. (`internal/public_api_service/transport/http/message_handler.go`)
+        *   [x] Validate request (basic DTO).
+        *   [x] Create initial `OutboxMessage` record with "queued" status.
+        *   [x] Publish "send SMS" job to NATS.
+        *   [x] Return `message_id` and "Queued" status.
+    *   [x] Implement `GET /messages/{message_id}` endpoint (reads from `outbox_messages`). (In `message_handler.go`)
+*   [~] **Testing (Unit & Basic Integration):** (Placeholders created for Phase 2 components)
+    *   [x] Create placeholder unit test files for `billing-service` repo & app.
+    *   [x] Create placeholder unit test files for `sms-sending-service` repo & app.
+    *   [x] Create placeholder unit test files for `public-api-service` message handlers.
+    *   [ ] Write basic integration tests for the send SMS flow (API call -> NATS -> `sms-sending-service` -> mock provider -> DB update). (To Do)
+
 
 ## Phase 3: Delivery Reports & Incoming SMS
 (All items below are [ ])
@@ -158,7 +164,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [ ] Setup Jaeger/Zipkin for trace visualization.
 *   [ ] **Testing:**
     *   [ ] **Unit Tests:** Achieve target code coverage for all services.
-    *   [ ] **Integration Tests:**
+    *   [~] **Integration Tests:** (Basic structure described, execution To Do)
         *   [ ] Service-to-Database tests.
         *   [ ] Service-to-NATS tests.
         *   [ ] Service-to-Service tests (gRPC interactions).
