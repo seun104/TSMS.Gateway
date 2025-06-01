@@ -1,23 +1,19 @@
 # Default application configuration
-# Environment variables (prefixed with APP_) will override these values if set.
-# Example: export APP_USER_SERVICE_GRPC_PORT=50052
-
-LOG_LEVEL: "info" # e.g., debug, info, warn, error
-POSTGRES_DSN: "postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable" # Matches docker-compose service name
-NATS_URL: "nats://nats:4222" # Matches docker-compose service name
+LOG_LEVEL: "info"
+POSTGRES_DSN: "postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable"
+NATS_URL: "nats://nats:4222"
 
 # User Service
 USER_SERVICE_GRPC_PORT: 50051
-JWT_ACCESS_SECRET: "your_very_secret_access_key_env_override_in_prod_12345" # MUST BE OVERRIDDEN BY ENV
-JWT_REFRESH_SECRET: "your_very_secret_refresh_key_env_override_in_prod_67890" # MUST BE OVERRIDDEN BY ENV
+JWT_ACCESS_SECRET: "your_very_secret_access_key_env_override_in_prod_12345"
+JWT_REFRESH_SECRET: "your_very_secret_refresh_key_env_override_in_prod_67890"
 JWT_ACCESS_EXPIRY_HOURS: 1
-JWT_REFRESH_EXPIRY_HOURS: 720 # 30 days
+JWT_REFRESH_EXPIRY_HOURS: 720
 
 # Public API Service
 PUBLIC_API_SERVICE_PORT: 8080
-USER_SERVICE_GRPC_CLIENT_TARGET: "user-service:50051" # Internal K8s/Docker Compose DNS name for user-service
+USER_SERVICE_GRPC_CLIENT_TARGET: "user-service:50051"
 
-# Example for a specific service (if not using global APP_ prefix for all)
-# user_service:
-#   jwt_secret: "your_jwt_secret_key_env_override"
-#   token_expiry_hours: 24
+# Billing Service
+BILLING_SERVICE_GRPC_PORT: 50052
+BILLING_SERVICE_GRPC_CLIENT_TARGET: "billing-service:50052" # Added (use Docker Compose service name)

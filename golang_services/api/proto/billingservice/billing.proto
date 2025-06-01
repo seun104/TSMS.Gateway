@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package billingservice;
+
+option go_package = "github.com/aradsms/golang_services/api/proto/billingservice"; // Adjust
+
+import "google/protobuf/timestamp.proto";
+
+enum TransactionTypeProto {
+    TRANSACTION_TYPE_PROTO_UNSPECIFIED = 0;
+    TRANSACTION_TYPE_PROTO_CREDIT_PURCHASE = 1;
+    TRANSACTION_TYPE_PROTO_SMS_CHARGE = 2;
+    TRANSACTION_TYPE_PROTO_REFUND = 3;
+    TRANSACTION_TYPE_PROTO_SERVICE_ACTIVATION_FEE = 4;
+    TRANSACTION_TYPE_PROTO_MANUAL_ADJUSTMENT = 5;
+}
+
+message TransactionProto {
+    string id = 1;
+    string user_id = 2;
+    TransactionTypeProto type = 3;
+    double amount = 4; // Consider string for precision or custom decimal type
+    string currency_code = 5;
+    string description = 6;
+    string related_message_id = 7; // Optional
+    string payment_gateway_txn_id = 8; // Optional
+    google.protobuf.Timestamp created_at = 9;
+    double balance_after = 10; // Optional
+}
+
+message CheckAndDeductCreditRequest {
+    string user_id = 1;
+    double amount_to_deduct = 2; // Should be positive
+    TransactionTypeProto transaction_type = 3;
+    string description = 4;
+    string related_message_id = 5; // Optional
+}
+
+message CheckAndDeductCreditResponse {
+    TransactionProto transaction = 1;
+    // bool success = 1;
+    // string transaction_id =2;
+    // string error_message =3; // if not successful
+}
+
+service BillingServiceInternal {
+    rpc CheckAndDeductCredit(CheckAndDeductCreditRequest) returns (CheckAndDeductCreditResponse);
+}
