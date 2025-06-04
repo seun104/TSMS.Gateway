@@ -121,8 +121,13 @@ This document outlines the key implementation steps and progress tracking for re
         *   [x] Validate callback (basic path param, JSON decoding, DTO validation).
         *   [x] Publish raw incoming SMS data to a NATS subject (`sms.incoming.raw.{provider_name}`).
 *   [ ] **Inbound Processor Service (`inbound-processor-service`):**
-    *   [ ] NATS: Consume raw incoming SMS data from NATS.
-    *   [ ] Basic parsing logic (store in `inbox_messages` table).
+    *   [x] Initial directory structure and `main.go` created. (`cmd/inbound_processor_service`, `internal/inbound_processor_service`)
+    *   [x] Integrate into build system (Makefile) and deployment (docker-compose.yml using shared Dockerfile.golang).
+    *   [x] Define `InboxMessage` domain model and `InboxRepository` interface. (`domain/inbox_message.go`, `domain/inbox_repository.go`)
+    *   [x] Implement PostgreSQL `InboxRepository` (`repository/postgres/inbox_repository_pg.go`).
+    *   [x] Create database migrations for `inbox_messages` table (`migrations/000005_create_inbox_messages_table.up.sql` and `.down.sql`).
+    *   [x] NATS: Consume raw incoming SMS data from NATS. (`app/sms_consumer.go`, integrated into `main.go`)
+    *   [x] Basic parsing logic (store in `inbox_messages` table). (`app/sms_processor.go` created and integrated into `main.go`)
     *   [ ] Associate with user/private number.
 
 ## Phase 4: Phonebook & Advanced Features
