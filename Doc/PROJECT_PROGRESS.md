@@ -100,9 +100,17 @@ This document outlines the key implementation steps and progress tracking for re
 ## Phase 3: Delivery Reports & Incoming SMS
 (All items below are [ ])
 *   [ ] **Delivery Retrieval Service (`delivery-retrieval-service`):**
-    *   [ ] Logic to poll providers (for the one implemented) for delivery reports (if applicable).
-    *   [ ] Implement cron job for periodic polling.
-    *   [ ] Update `outbox_messages` table with DLR status.
+    *   [x] Initial directory structure and `main.go` created. (`cmd/delivery_retrieval_service`, `internal/delivery_retrieval_service`)
+    *   [x] Define `DeliveryReport` and `DeliveryStatus` domain models. (`internal/delivery_retrieval_service/domain/delivery_report.go`)
+    *   [x] Define `OutboxMessage` domain model (minimal) and `OutboxRepository` interface. (`domain/outbox_message.go`, `domain/outbox_repository.go`)
+    *   [x] Implement PostgreSQL `OutboxRepository` (`repository/postgres/outbox_repository_pg.go`).
+    *   [x] Implement `DLRProcessor` service (`app/dlr_processor.go`) for database updates.
+    *   [x] Implement mock provider polling logic (`app/poller.go`) and integrate into `main.go` ticker.
+    *   [x] Integrate `DLRProcessor` into `main.go` to process polled DLRs.
+    *   [x] Integrate into build system (Makefile) and deployment (docker-compose.yml with shared Dockerfile.golang).
+    *   [ ] Logic to poll providers (for the one implemented) for delivery reports (if applicable). (Mock logic exists, real logic pending)
+    *   [ ] Implement cron job for periodic polling. (Ticker implemented in main, could be refactored to cron if needed)
+    *   [x] Update `outbox_messages` table with DLR status. (Initial implementation via DLRProcessor and OutboxRepository)
     *   [ ] (Optional) NATS: Publish DLR events.
 *   [ ] **Public API Service (`public-api-service`):**
     *   [ ] Implement `POST /incoming/receive/{provider_name}` endpoint for provider DLR callbacks.

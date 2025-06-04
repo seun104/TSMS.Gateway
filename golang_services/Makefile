@@ -18,6 +18,8 @@ SMS_SENDING_SERVICE_DIR := ./cmd/sms_sending_service
 SMS_SENDING_SERVICE_BIN := ./bin/sms_sending_service
 BILLING_SERVICE_DIR := ./cmd/billing_service
 BILLING_SERVICE_BIN := ./bin/billing_service
+DELIVERY_RETRIEVAL_SERVICE_DIR := ./cmd/delivery_retrieval_service
+DELIVERY_RETRIEVAL_SERVICE_BIN := ./bin/delivery_retrieval_service
 
 # Go packages for linting and testing (adjust as needed)
 GO_PACKAGES := ./...
@@ -26,7 +28,7 @@ GO_PACKAGES := ./...
 all: build lint test
 
 # Build services
-build: $(USER_SERVICE_BIN) $(PUBLIC_API_SERVICE_BIN) $(SMS_SENDING_SERVICE_BIN) $(BILLING_SERVICE_BIN)
+build: $(USER_SERVICE_BIN) $(PUBLIC_API_SERVICE_BIN) $(SMS_SENDING_SERVICE_BIN) $(BILLING_SERVICE_BIN) $(DELIVERY_RETRIEVAL_SERVICE_BIN)
 
 $(USER_SERVICE_BIN):
 	@echo "Building User Service..."
@@ -47,6 +49,11 @@ $(BILLING_SERVICE_BIN):
 	@echo "Building Billing Service..."
 	@mkdir -p ./bin
 	$(GO_BUILD_CMD) -o $(BILLING_SERVICE_BIN) $(BILLING_SERVICE_DIR)/main.go
+
+$(DELIVERY_RETRIEVAL_SERVICE_BIN):
+	@echo "Building Delivery Retrieval Service..."
+	@mkdir -p ./bin
+	$(GO_BUILD_CMD) -o $(DELIVERY_RETRIEVAL_SERVICE_BIN) $(DELIVERY_RETRIEVAL_SERVICE_DIR)/main.go
 
 # Run services (using Docker Compose)
 run:
@@ -91,5 +98,6 @@ help:
 	@echo "  $(PUBLIC_API_SERVICE_BIN)"
 	@echo "  $(SMS_SENDING_SERVICE_BIN)"
 	@echo "  $(BILLING_SERVICE_BIN)"
+	@echo "  $(DELIVERY_RETRIEVAL_SERVICE_BIN)"
 
 # Example of building a specific service: make ./bin/user_service
