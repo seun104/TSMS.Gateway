@@ -113,12 +113,13 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Update `outbox_messages` table with DLR status. (Initial implementation via DLRProcessor and OutboxRepository)
     *   [ ] (Optional) NATS: Publish DLR events.
 *   [ ] **Public API Service (`public-api-service`):**
-    *   [ ] Implement `POST /incoming/receive/{provider_name}` endpoint for provider DLR callbacks.
-        *   [ ] Validate callback.
-        *   [ ] Publish DLR data to a NATS subject for `delivery-retrieval-service` or directly update DB if simple.
-    *   [ ] Implement endpoint for provider incoming SMS callbacks.
-        *   [ ] Validate callback.
-        *   [ ] Publish raw incoming SMS data to a NATS subject.
+    *   [x] Define DTOs for provider DLR and incoming SMS callbacks (`ProviderDLRCallbackRequest`, `ProviderIncomingSMSRequest` in `internal/public_api_service/transport/http/incoming_dtos.go`).
+    *   [x] Implement `POST /incoming/receive/{provider_name}` endpoint for provider DLR callbacks. (`internal/public_api_service/transport/http/incoming_handler.go` and `cmd/public_api_service/main.go`)
+        *   [x] Validate callback (basic path param, JSON decoding, DTO validation).
+        *   [x] Publish DLR data to a NATS subject (`dlr.raw.{provider_name}`).
+    *   [x] Implement endpoint for provider incoming SMS callbacks. (`internal/public_api_service/transport/http/incoming_handler.go` and `cmd/public_api_service/main.go`)
+        *   [x] Validate callback (basic path param, JSON decoding, DTO validation).
+        *   [x] Publish raw incoming SMS data to a NATS subject (`sms.incoming.raw.{provider_name}`).
 *   [ ] **Inbound Processor Service (`inbound-processor-service`):**
     *   [ ] NATS: Consume raw incoming SMS data from NATS.
     *   [ ] Basic parsing logic (store in `inbox_messages` table).

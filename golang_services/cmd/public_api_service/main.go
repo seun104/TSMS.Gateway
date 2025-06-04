@@ -18,14 +18,15 @@ import (
 	"github.com/aradsms/golang_services/internal/platform/messagebroker"
 	"github.com/aradsms/golang_services/internal/public_api_service/adapters/grpc_clients"
 	"github.com/aradsms/golang_services/internal/public_api_service/middleware"
-	httptransport "github.com/aradsms/golang_services/internal/public_api_service/transport/http"
+	httptransport "github.com/aradsms/golang_services/internal/public_api_service/transport/http" // Alias for clarity if needed elsewhere
+	incomingHttp "github.com/aradsms/golang_services/internal/public_api_service/transport/http" // Specific alias for incoming handler
 
 	// Import for OutboxRepository implementation
 	outboxRepoImpl "github.com/aradsms/golang_services/internal/sms_sending_service/repository/postgres"
 
-
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/go-playground/validator/v10" // Import validator
 	"github.com/nats-io/nats.go"
 )
 
@@ -84,6 +85,9 @@ func main() {
 	// Initialize Handlers
 	authHandler := httptransport.NewAuthHandler(userSvcClient, appLogger)
     messageHandler := httptransport.NewMessageHandler(natsClient, outboxRepo, dbPool, appLogger)
+	// Initialize validator
+	validate := validator.New()
+    incomingHandler := incomingHttp.NewIncomingHandler(natsClient, appLogger, validate)
 
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +104,11 @@ func main() {
         msgRouter.Use(authMW) // Apply auth middleware to all message routes
         messageHandler.RegisterRoutes(msgRouter)
     })
+
+    // Incoming callback routes (typically not authenticated by user JWT, but by IP, secret, or other mechanism)
+    // For now, placing it at the root. Consider if it needs a specific path prefix e.g. /callbacks
+    r.Post("/incoming/receive/{provider_name}", incomingHandler.HandleDLRCallback)
+    r.Post("/incoming/sms/{provider_name}", incomingHandler.HandleIncomingSMSCallback)
 
 
 	r.Group(func(protected chi.Router) {
