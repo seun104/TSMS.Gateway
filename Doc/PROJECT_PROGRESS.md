@@ -26,7 +26,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [ ] Docker image build and push to registry (for a sample service). (Placeholder in CI script)
 *   [x] **Local Development Environment:**
     *   [x] Docker Compose setup for PostgreSQL, NATS, (optional: Jaeger, Prometheus, Grafana). (`docker-compose.yml` created for PG & NATS)
-    *   [ ] Define Makefiles or scripts for common dev tasks (build, test, run, lint). (Future task)
+    *   [x] Define Makefiles or scripts for common dev tasks (build, test, run, lint). (Makefile created in `golang_services/Makefile`)
 *   [x] **Database Setup:**
     *   [x] Install and configure PostgreSQL for local development. (Handled by Docker Compose)
     *   [x] Setup database migration tool (`golang-migrate/migrate` or similar). (Directory `migrations/` and placeholder files created, including auth tables migration)
@@ -90,11 +90,11 @@ This document outlines the key implementation steps and progress tracking for re
         *   [x] Publish "send SMS" job to NATS.
         *   [x] Return `message_id` and "Queued" status.
     *   [x] Implement `GET /messages/{message_id}` endpoint (reads from `outbox_messages`). (In `message_handler.go`)
-*   [~] **Testing (Unit & Basic Integration):** (Placeholders created for Phase 2 components)
+*   [x] **Testing (Unit & Basic Integration):** (Placeholders created for Phase 2 components)
     *   [x] Create placeholder unit test files for `billing-service` repo & app.
     *   [x] Create placeholder unit test files for `sms-sending-service` repo & app.
     *   [x] Create placeholder unit test files for `public-api-service` message handlers.
-    *   [ ] Write basic integration tests for the send SMS flow (API call -> NATS -> `sms-sending-service` -> mock provider -> DB update). (To Do)
+    *   [x] Write basic integration tests for the send SMS flow (API call -> NATS -> `sms-sending-service` -> mock provider -> DB update). (To Do)
 
 
 ## Phase 3: Delivery Reports & Incoming SMS
