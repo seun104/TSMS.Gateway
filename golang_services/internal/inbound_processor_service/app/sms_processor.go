@@ -11,17 +11,23 @@ import (
 )
 
 // SMSProcessor is responsible for processing validated incoming SMS messages
-// and storing them in the database.
+// and storing them in the database, potentially associating them with users/private numbers.
 type SMSProcessor struct {
-	inboxRepo domain.InboxRepository
-	logger    *slog.Logger
+	inboxRepo      domain.InboxRepository
+	privateNumRepo domain.PrivateNumberRepository // Added repository for private numbers
+	logger         *slog.Logger
 }
 
 // NewSMSProcessor creates a new SMSProcessor instance.
-func NewSMSProcessor(inboxRepo domain.InboxRepository, logger *slog.Logger) *SMSProcessor {
+func NewSMSProcessor(
+	inboxRepo domain.InboxRepository,
+	privateNumRepo domain.PrivateNumberRepository,
+	logger *slog.Logger,
+) *SMSProcessor {
 	return &SMSProcessor{
-		inboxRepo: inboxRepo,
-		logger:    logger,
+		inboxRepo:      inboxRepo,
+		privateNumRepo: privateNumRepo,
+		logger:         logger,
 	}
 }
 
@@ -65,7 +71,32 @@ func (s *SMSProcessor) ProcessMessage(ctx context.Context, event InboundSMSEvent
 	// UserID and PrivateNumberID are left as default (uuid.NullUUID) for now.
 	// ProcessedAt is set by NewInboxMessage().
 
-	s.logger.DebugContext(ctx, "Transformed to InboxMessage", "inbox_message_id", inboxMsg.ID, "details", inboxMsg)
+	// Attempt to associate with a private number and user
+	privateNum, pnErr := s.privateNumRepo.FindByNumber(ctx, inboxMsg.To)
+	if pnErr != nil {
+		// Log the error but don't fail the entire message processing for this.
+		// The message will be saved without association.
+		s.logger.ErrorContext(ctx, "Failed to query private number for association",
+			"error", pnErr,
+			"recipient_number", inboxMsg.To,
+			"inbox_message_id", inboxMsg.ID,
+		)
+	} else if privateNum != nil {
+		inboxMsg.UserID = uuid.NullUUID{UUID: privateNum.UserID, Valid: true}
+		inboxMsg.PrivateNumberID = uuid.NullUUID{UUID: privateNum.ID, Valid: true}
+		s.logger.InfoContext(ctx, "Associated incoming SMS with private number and user",
+			"inbox_message_id", inboxMsg.ID,
+			"private_number_id", privateNum.ID,
+			"user_id", privateNum.UserID,
+		)
+	} else {
+		s.logger.InfoContext(ctx, "No private number found for association",
+			"recipient_number", inboxMsg.To,
+			"inbox_message_id", inboxMsg.ID,
+		)
+	}
+
+	s.logger.DebugContext(ctx, "Final InboxMessage before saving", "inbox_message_id", inboxMsg.ID, "details", inboxMsg)
 
 	// Save to database
 	err := s.inboxRepo.Create(ctx, inboxMsg)
@@ -83,6 +114,8 @@ func (s *SMSProcessor) ProcessMessage(ctx context.Context, event InboundSMSEvent
 		"inbox_message_id", inboxMsg.ID,
 		"provider_name", event.ProviderName,
 		"provider_message_id", event.Data.MessageID,
+		"associated_user_id", inboxMsg.UserID,
+		"associated_private_number_id", inboxMsg.PrivateNumberID,
 	)
 	return nil
 }

@@ -104,14 +104,15 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Define `DeliveryReport` and `DeliveryStatus` domain models. (`internal/delivery_retrieval_service/domain/delivery_report.go`)
     *   [x] Define `OutboxMessage` domain model (minimal) and `OutboxRepository` interface. (`domain/outbox_message.go`, `domain/outbox_repository.go`)
     *   [x] Implement PostgreSQL `OutboxRepository` (`repository/postgres/outbox_repository_pg.go`).
-    *   [x] Implement `DLRProcessor` service (`app/dlr_processor.go`) for database updates.
-    *   [x] Implement mock provider polling logic (`app/poller.go`) and integrate into `main.go` ticker.
-    *   [x] Integrate `DLRProcessor` into `main.go` to process polled DLRs.
+    *   [x] Implement `DLRProcessor` service (`app/dlr_processor.go`) for database updates, adapted for NATS events.
+    *   [x] Implement mock provider polling logic (`app/poller.go`) - (Now disabled in main.go, replaced by NATS consumer).
+    *   [x] Integrate `DLRProcessor` into `main.go` to process polled DLRs - (Now processes DLR events from NATS consumer).
     *   [x] Integrate into build system (Makefile) and deployment (docker-compose.yml with shared Dockerfile.golang).
-    *   [ ] Logic to poll providers (for the one implemented) for delivery reports (if applicable). (Mock logic exists, real logic pending)
-    *   [ ] Implement cron job for periodic polling. (Ticker implemented in main, could be refactored to cron if needed)
-    *   [x] Update `outbox_messages` table with DLR status. (Initial implementation via DLRProcessor and OutboxRepository)
-    *   [ ] (Optional) NATS: Publish DLR events.
+    *   [x] NATS: Consume DLR events from `dlr.raw.*` (`app/dlr_consumer.go` and integrated into `main.go`).
+    *   [ ] Logic to poll providers (for the one implemented) for delivery reports (if applicable). (Replaced by NATS-based DLR consumption)
+    *   [ ] Implement cron job for periodic polling. (Replaced by NATS-based DLR consumption)
+    *   [x] Update `outbox_messages` table with DLR status. (Implementation via DLRProcessor using NATS events)
+    *   [x] (Optional) NATS: Publish DLR events. (Implemented in `DLRProcessor` to publish `ProcessedDLREvent` to `dlr.processed.v1.{providerName}`)
 *   [ ] **Public API Service (`public-api-service`):**
     *   [x] Define DTOs for provider DLR and incoming SMS callbacks (`ProviderDLRCallbackRequest`, `ProviderIncomingSMSRequest` in `internal/public_api_service/transport/http/incoming_dtos.go`).
     *   [x] Implement `POST /incoming/receive/{provider_name}` endpoint for provider DLR callbacks. (`internal/public_api_service/transport/http/incoming_handler.go` and `cmd/public_api_service/main.go`)
@@ -128,7 +129,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Create database migrations for `inbox_messages` table (`migrations/000005_create_inbox_messages_table.up.sql` and `.down.sql`).
     *   [x] NATS: Consume raw incoming SMS data from NATS. (`app/sms_consumer.go`, integrated into `main.go`)
     *   [x] Basic parsing logic (store in `inbox_messages` table). (`app/sms_processor.go` created and integrated into `main.go`)
-    *   [ ] Associate with user/private number.
+    *   [x] Associate with user/private number. (Implemented in `SMSProcessor` using `PrivateNumberRepository`)
 
 ## Phase 4: Phonebook & Advanced Features
 (All items below are [ ])

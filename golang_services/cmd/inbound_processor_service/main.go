@@ -74,12 +74,13 @@ func main() {
 	// Example:
 	// Initialize Repositories
 	inboxRepo := postgres.NewPgInboxRepository(dbPool, log)
+	privateNumRepo := postgres.NewPgPrivateNumberRepository(dbPool, log)
 
 	// Initialize Application Services / Components
 	// Create a channel for passing messages from consumer to processor logic. Buffer size can be tuned.
 	inboundEventsChan := make(chan app.InboundSMSEvent, 100)
 	smsConsumer := app.NewSMSConsumer(nc, log, inboundEventsChan)
-	smsProcessor := app.NewSMSProcessor(inboxRepo, log)
+	smsProcessor := app.NewSMSProcessor(inboxRepo, privateNumRepo, log) // Pass privateNumRepo
 	// inboundApp := app.NewInboundApplication(smsProcessor, ...) // Higher-level app service if needed
 
 	// Start background workers, NATS consumers, etc.

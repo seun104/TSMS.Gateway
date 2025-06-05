@@ -72,14 +72,52 @@ func main() {
 	outboxRepo := postgres.NewPgOutboxRepository(dbPool, log)
 
 	// Initialize Application Services
-	dlrPoller := app.NewDLRPoller(log)
-	dlrProcessor := app.NewDLRProcessor(outboxRepo, log)
+	// dlrPoller := app.NewDLRPoller(log) // Mock poller, to be replaced/disabled
+	dlrProcessor := app.NewDLRProcessor(outboxRepo, nc, log) // Pass NATS client 'nc'
+
+	// Create a channel for passing DLR events from consumer to processor
+	dlrEventsChan := make(chan app.DLREvent, 100) // Buffer size can be tuned
+
+	// Initialize DLR Consumer
+	dlrConsumer := app.NewDLRConsumer(nc, log, dlrEventsChan)
 
 	// Start background workers, consumers, servers
 	// Use errgroup with the mainCtx for goroutines that should run until shutdown
 	g, groupCtx := errgroup.WithContext(mainCtx)
 
-	// Start the DLR Poller ticker
+	// Start the NATS DLR Consumer
+	g.Go(func() error {
+		log.Info("Starting NATS DLR consumer worker...")
+		// Subject "dlr.raw.*" captures DLRs from all providers (assuming provider name is the last part of the subject)
+		// Queue group "dlr_processor_group" ensures load balancing if multiple instances are run.
+		return dlrConsumer.StartConsuming(groupCtx, "dlr.raw.*", "dlr_processor_group")
+	})
+
+	// Start a worker goroutine to process DLR events from dlrEventsChan
+	g.Go(func() error {
+		log.Info("Starting DLR event processor worker...")
+		for {
+			select {
+			case event := <-dlrEventsChan:
+				// Process the received DLR event using DLRProcessor
+				if err := dlrProcessor.ProcessDLREvent(groupCtx, event); err != nil {
+					log.ErrorContext(groupCtx, "Failed to process DLR event",
+						"error", err,
+						"provider", event.ProviderName,
+						"provider_message_id", event.RequestData.ProviderMessageID,
+						"original_message_id", event.RequestData.MessageID,
+					)
+					// Depending on the error, might implement retry or dead-lettering for specific errors.
+				}
+			case <-groupCtx.Done():
+				log.InfoContext(groupCtx, "DLR event processor worker shutting down.", "error", groupCtx.Err())
+				return groupCtx.Err()
+			}
+		}
+	})
+
+	// Comment out or remove the old mock DLRPoller logic
+	/*
 	g.Go(func() error {
 		log.Info("Starting DLR poller worker...")
 		ticker := time.NewTicker(pollingInterval)
@@ -88,36 +126,28 @@ func main() {
 		for {
 			select {
 			case <-ticker.C:
-				// Use a new context for each poll operation with a timeout
-				pollCtx, pollCancel := context.WithTimeout(groupCtx, pollingInterval- (5 * time.Second) ) // Ensure poll timeout is less than interval
-				reports, pollErr := dlrPoller.PollProvider(pollCtx)
+				pollCtx, pollCancel := context.WithTimeout(groupCtx, pollingInterval-(5*time.Second))
+				reports, pollErr := dlrPoller.PollProvider(pollCtx) // This is the mock poller
 				if pollErr != nil {
 					log.ErrorContext(pollCtx, "Error polling for DLRs", "error", pollErr)
-					// Continue to next tick even if polling fails
 				} else {
 					if len(reports) > 0 {
 						log.InfoContext(pollCtx, "Successfully polled DLRs", "count", len(reports))
-						// Process the DLRs
-						if processErr := dlrProcessor.ProcessDLRs(pollCtx, reports); processErr != nil {
+						if processErr := dlrProcessor.ProcessDLRs(pollCtx, reports); processErr != nil { // Uses old ProcessDLRs
 							log.ErrorContext(pollCtx, "Error processing DLRs", "error", processErr)
 						}
 					} else {
 						log.InfoContext(pollCtx, "No new DLRs from poll.")
 					}
 				}
-				pollCancel() // Release resources associated with pollCtx
-			case <-groupCtx.Done(): // Triggered by mainCancel() or if another goroutine in group fails
+				pollCancel()
+			case <-groupCtx.Done():
 				log.Info("DLR poller worker stopping due to group context done.", "error", groupCtx.Err())
 				return groupCtx.Err()
 			}
 		}
 	})
-
-	// Example: Start a NATS consumer (if this service also consumes messages)
-	// g.Go(func() error {
-	//	 log.Info("Starting NATS consumer...")
-	//	 return deliveryApp.StartDLRConsumer(groupCtx) // Pass groupCtx
-	// })
+	*/
 
 	log.Info("Service components initialized and workers started. Service is ready.")
 
