@@ -141,6 +141,29 @@ volumes:
     # networks: # Uncomment if using a custom network like aradsms_net
     #   - aradsms_net
 
+  scheduler_service:
+    build:
+      context: . # Root of golang_services
+      dockerfile: Dockerfile.golang # Shared Dockerfile
+      args:
+        SERVICE_NAME: scheduler_service
+    container_name: aradsms_scheduler_service_dev
+    environment:
+      - APP_NAME=scheduler_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      # Add any other specific environment variables needed, e.g., for cron schedules
+      # Example: - SCHEDULER_CRON_EXPRESSION="*/5 * * * *" # Every 5 minutes
+    depends_on:
+      postgres: # Ensure db is ready
+        condition: service_healthy
+      nats:     # Ensure nats is ready
+        condition: service_healthy
+    restart: unless-stopped
+    # networks: # Uncomment if using a custom network like aradsms_net
+    #   - aradsms_net
+
 volumes:
   postgres_data: # Defines a named volume for persisting PostgreSQL data
 

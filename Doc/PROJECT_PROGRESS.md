@@ -145,9 +145,10 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Define HTTP DTOs for Phonebook and Contact operations (`internal/public_api_service/transport/http/phonebook_dtos.go`).
     *   [x] Implement all `/phonebooks` and `/contacts` CRUD endpoints (calling `phonebook-service` via gRPC). (Phonebook & Contact CRUD handlers implemented in `phonebook_handler.go` and routes registered in `main.go`)
 *   [ ] **Scheduler Service (`scheduler-service`):**
-    *   [ ] Define `ScheduledJob` model.
-    *   [ ] Implement PostgreSQL schema & migrations for `scheduled_jobs`.
-    *   [ ] Implement `ScheduledJobRepository`.
+    *   [x] Initial directory structure, `main.go`, Makefile, and docker-compose.yml entry created.
+    *   [x] Define `ScheduledJob` model. (`internal/scheduler_service/domain/scheduled_job.go`)
+    *   [x] Implement PostgreSQL schema & migrations for `scheduled_jobs`. (`migrations/000007_create_scheduled_jobs_table.up.sql` & `.down.sql`)
+    *   [x] Implement `ScheduledJobRepository` interface and PostgreSQL implementation. (`domain/scheduled_job_repository.go`, `repository/postgres/scheduled_job_repository_pg.go`)
     *   [ ] Implement cron job logic to check `scheduled_jobs` table.
     *   [ ] NATS: Publish "send SMS" jobs to NATS for due scheduled messages.
 *   [ ] **Public API Service (`public-api-service`):**
