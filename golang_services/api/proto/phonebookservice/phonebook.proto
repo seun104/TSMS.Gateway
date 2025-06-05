@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package phonebookservice;
+
+option go_package = "github.com/aradsms/golang_services/api/proto/phonebookservice;phonebookservice";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+// import "google/protobuf/wrappers.proto"; // Not strictly needed for now, can add later for optional fields if desired
+
+message Phonebook {
+  string id = 1; // UUID
+  string user_id = 2; // UUID
+  string name = 3;
+  string description = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message Contact {
+  string id = 1; // UUID
+  string phonebook_id = 2; // UUID
+  string number = 3;
+  string first_name = 4;
+  string last_name = 5;
+  string email = 6;
+  map<string, string> custom_fields = 7;
+  bool subscribed = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+// Phonebook RPC Messages
+message CreatePhonebookRequest {
+  string name = 1;
+  string description = 2;
+  // UserID will be extracted from auth context in the server
+}
+
+message CreatePhonebookResponse {
+  Phonebook phonebook = 1;
+}
+
+message GetPhonebookRequest {
+  string id = 1; // Phonebook ID
+  // UserID will be extracted from auth context
+}
+
+message GetPhonebookResponse {
+  Phonebook phonebook = 1;
+}
+
+message ListPhonebooksRequest {
+  // UserID will be extracted from auth context
+  int32 offset = 1;
+  int32 limit = 2;
+}
+
+message ListPhonebooksResponse {
+  repeated Phonebook phonebooks = 1;
+  int32 total_count = 2;
+}
+
+message UpdatePhonebookRequest {
+  string id = 1; // Phonebook ID
+  string name = 2;
+  string description = 3;
+  // UserID will be extracted from auth context
+}
+
+message UpdatePhonebookResponse {
+  Phonebook phonebook = 1;
+}
+
+message DeletePhonebookRequest {
+  string id = 1; // Phonebook ID
+  // UserID will be extracted from auth context
+}
+
+// DeletePhonebookResponse uses google.protobuf.Empty
+
+// Contact RPC Messages
+message CreateContactRequest {
+  string phonebook_id = 1; // UUID of the phonebook this contact belongs to
+  string number = 2;
+  string first_name = 3;
+  string last_name = 4;
+  string email = 5;
+  map<string, string> custom_fields = 6;
+  bool subscribed = 7;
+  // UserID (for phonebook ownership) will be checked from auth context
+}
+
+message CreateContactResponse {
+  Contact contact = 1;
+}
+
+message GetContactRequest {
+  string id = 1; // Contact ID
+  string phonebook_id = 2; // Phonebook ID (for authorization context)
+  // UserID (for phonebook ownership) will be checked from auth context
+}
+
+message GetContactResponse {
+  Contact contact = 1;
+}
+
+message ListContactsRequest {
+  string phonebook_id = 1; // Phonebook ID
+  int32 offset = 2;
+  int32 limit = 3;
+  // UserID (for phonebook ownership) will be checked from auth context
+}
+
+message ListContactsResponse {
+  repeated Contact contacts = 1;
+  int32 total_count = 2;
+}
+
+message UpdateContactRequest {
+  string id = 1; // Contact ID
+  string phonebook_id = 2; // Phonebook ID (for authorization context)
+  string number = 3;
+  string first_name = 4;
+  string last_name = 5;
+  string email = 6;
+  map<string, string> custom_fields = 7;
+  bool subscribed = 8;
+  // UserID (for phonebook ownership) will be checked from auth context
+}
+
+message UpdateContactResponse {
+  Contact contact = 1;
+}
+
+message DeleteContactRequest {
+  string id = 1; // Contact ID
+  string phonebook_id = 2; // Phonebook ID (for authorization context)
+  // UserID (for phonebook ownership) will be checked from auth context
+}
+// DeleteContactResponse uses google.protobuf.Empty
+
+
+// Service Definition
+service PhonebookService {
+  // Phonebook operations
+  rpc CreatePhonebook(CreatePhonebookRequest) returns (CreatePhonebookResponse);
+  rpc GetPhonebook(GetPhonebookRequest) returns (GetPhonebookResponse);
+  rpc ListPhonebooks(ListPhonebooksRequest) returns (ListPhonebooksResponse);
+  rpc UpdatePhonebook(UpdatePhonebookRequest) returns (UpdatePhonebookResponse);
+  rpc DeletePhonebook(DeletePhonebookRequest) returns (google.protobuf.Empty);
+
+  // Contact operations
+  rpc CreateContact(CreateContactRequest) returns (CreateContactResponse);
+  rpc GetContact(GetContactRequest) returns (GetContactResponse);
+  rpc ListContacts(ListContactsRequest) returns (ListContactsResponse);
+  rpc UpdateContact(UpdateContactRequest) returns (UpdateContactResponse);
+  rpc DeleteContact(DeleteContactRequest) returns (google.protobuf.Empty);
+}

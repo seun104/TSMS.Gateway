@@ -134,10 +134,12 @@ This document outlines the key implementation steps and progress tracking for re
 ## Phase 4: Phonebook & Advanced Features
 (All items below are [ ])
 *   [ ] **Phonebook Service (`phonebook-service`):**
-    *   [ ] Define `Phonebook`, `Contact` domain models.
-    *   [ ] Implement PostgreSQL schema & migrations for `phonebooks`, `contacts`, `phonebook_contacts`.
-    *   [ ] Implement `PhonebookRepository`, `ContactRepository`.
-    *   [ ] Implement gRPC interface for CRUD operations.
+    *   [x] Initial directory structure, `main.go` (with gRPC setup placeholders), Makefile, and docker-compose.yml entry created.
+    *   [x] Define `Phonebook`, `Contact` domain models. (`internal/phonebook_service/domain/phonebook_models.go`)
+    *   [x] Implement PostgreSQL schema & migrations for `phonebooks`, `contacts`, `phonebook_contacts`. (`migrations/000006_create_phonebook_tables.up.sql` & `.down.sql`)
+    *   [x] Implement `PhonebookRepository`, `ContactRepository` interfaces and PostgreSQL implementations. (`domain/repositories.go`, `repository/postgres/*_repository_pg.go`)
+    *   [x] Implement gRPC interface for CRUD operations. (`api/proto/phonebookservice/phonebook.proto` defined and Go code generated)
+    *   [x] Implement gRPC server logic. (`app/phonebook_app.go`, `adapters/grpc/server.go`, and `cmd/phonebook_service/main.go` updated)
 *   [ ] **Public API Service (`public-api-service`):**
     *   [ ] Implement all `/phonebooks` and `/contacts` CRUD endpoints (calling `phonebook-service` via gRPC).
 *   [ ] **Scheduler Service (`scheduler-service`):**

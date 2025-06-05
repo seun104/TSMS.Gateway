@@ -116,6 +116,31 @@ volumes:
     # networks: # Uncomment if using a custom network like aradsms_net
     #   - aradsms_net
 
+  phonebook_service:
+    build:
+      context: . # Root of golang_services
+      dockerfile: Dockerfile.golang # Shared Dockerfile
+      args:
+        SERVICE_NAME: phonebook_service
+    container_name: aradsms_phonebook_service_dev
+    ports:
+      - "50054:50051" # Expose gRPC port (host:container), container port from APP_GRPC_PORT
+    environment:
+      - APP_NAME=phonebook_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222 # Optional for this service, but good for consistency
+      - APP_GRPC_PORT=50051 # Port the gRPC server inside the container will listen on
+      # Add any other specific environment variables needed
+    depends_on:
+      postgres: # Ensure db is ready
+        condition: service_healthy
+      nats:     # Ensure nats is ready (optional, remove if NATS not used by service)
+        condition: service_healthy
+    restart: unless-stopped
+    # networks: # Uncomment if using a custom network like aradsms_net
+    #   - aradsms_net
+
 volumes:
   postgres_data: # Defines a named volume for persisting PostgreSQL data
 

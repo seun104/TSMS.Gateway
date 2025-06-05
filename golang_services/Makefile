@@ -22,6 +22,8 @@ DELIVERY_RETRIEVAL_SERVICE_DIR := ./cmd/delivery_retrieval_service
 DELIVERY_RETRIEVAL_SERVICE_BIN := ./bin/delivery_retrieval_service
 INBOUND_PROCESSOR_SERVICE_DIR := ./cmd/inbound_processor_service
 INBOUND_PROCESSOR_SERVICE_BIN := ./bin/inbound_processor_service
+PHONEBOOK_SERVICE_DIR := ./cmd/phonebook_service
+PHONEBOOK_SERVICE_BIN := ./bin/phonebook_service
 
 # Go packages for linting and testing (adjust as needed)
 GO_PACKAGES := ./...
@@ -30,7 +32,7 @@ GO_PACKAGES := ./...
 all: build lint test
 
 # Build services
-build: $(USER_SERVICE_BIN) $(PUBLIC_API_SERVICE_BIN) $(SMS_SENDING_SERVICE_BIN) $(BILLING_SERVICE_BIN) $(DELIVERY_RETRIEVAL_SERVICE_BIN) $(INBOUND_PROCESSOR_SERVICE_BIN)
+build: $(USER_SERVICE_BIN) $(PUBLIC_API_SERVICE_BIN) $(SMS_SENDING_SERVICE_BIN) $(BILLING_SERVICE_BIN) $(DELIVERY_RETRIEVAL_SERVICE_BIN) $(INBOUND_PROCESSOR_SERVICE_BIN) $(PHONEBOOK_SERVICE_BIN)
 
 $(USER_SERVICE_BIN):
 	@echo "Building User Service..."
@@ -61,6 +63,11 @@ $(INBOUND_PROCESSOR_SERVICE_BIN):
 	@echo "Building Inbound Processor Service..."
 	@mkdir -p ./bin
 	$(GO_BUILD_CMD) -o $(INBOUND_PROCESSOR_SERVICE_BIN) $(INBOUND_PROCESSOR_SERVICE_DIR)/main.go
+
+$(PHONEBOOK_SERVICE_BIN):
+	@echo "Building Phonebook Service..."
+	@mkdir -p ./bin
+	$(GO_BUILD_CMD) -o $(PHONEBOOK_SERVICE_BIN) $(PHONEBOOK_SERVICE_DIR)/main.go
 
 # Run services (using Docker Compose)
 run:
@@ -107,5 +114,6 @@ help:
 	@echo "  $(BILLING_SERVICE_BIN)"
 	@echo "  $(DELIVERY_RETRIEVAL_SERVICE_BIN)"
 	@echo "  $(INBOUND_PROCESSOR_SERVICE_BIN)"
+	@echo "  $(PHONEBOOK_SERVICE_BIN)"
 
 # Example of building a specific service: make ./bin/user_service
