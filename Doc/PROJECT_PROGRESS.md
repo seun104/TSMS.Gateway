@@ -141,7 +141,9 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Implement gRPC interface for CRUD operations. (`api/proto/phonebookservice/phonebook.proto` defined and Go code generated)
     *   [x] Implement gRPC server logic. (`app/phonebook_app.go`, `adapters/grpc/server.go`, and `cmd/phonebook_service/main.go` updated)
 *   [ ] **Public API Service (`public-api-service`):**
-    *   [ ] Implement all `/phonebooks` and `/contacts` CRUD endpoints (calling `phonebook-service` via gRPC).
+    *   [x] Setup gRPC client for `phonebook-service`. (Configuration added, client initialized in `cmd/public_api_service/main.go`, placeholder handler created)
+    *   [x] Define HTTP DTOs for Phonebook and Contact operations (`internal/public_api_service/transport/http/phonebook_dtos.go`).
+    *   [x] Implement all `/phonebooks` and `/contacts` CRUD endpoints (calling `phonebook-service` via gRPC). (Phonebook & Contact CRUD handlers implemented in `phonebook_handler.go` and routes registered in `main.go`)
 *   [ ] **Scheduler Service (`scheduler-service`):**
     *   [ ] Define `ScheduledJob` model.
     *   [ ] Implement PostgreSQL schema & migrations for `scheduled_jobs`.

@@ -23,18 +23,24 @@ import (
 
 	// Import for OutboxRepository implementation
 	outboxRepoImpl "github.com/aradsms/golang_services/internal/sms_sending_service/repository/postgres"
+	phonebookPb "github.com/aradsms/golang_services/api/proto/phonebookservice" // Phonebook gRPC client
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-playground/validator/v10" // Import validator
 	"github.com/nats-io/nats.go"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
+const serviceName = "public_api_service"
+
 func main() {
-	cfg, err := config.Load("./configs", "config.defaults")
+	cfg, err := config.Load(serviceName) // Use serviceName for context if config loader uses it
 	if err != nil {
-            slog.Error("Failed to load configuration", "error", err); os.Exit(1)
-        }
+		slog.Error("Failed to load configuration", "service", serviceName, "error", err)
+		os.Exit(1)
+	}
 
 	appLogger := logger.New(cfg.LogLevel)
 	appLogger.Info("Public API service starting...", "port", cfg.PublicAPIServicePort)
@@ -55,9 +61,24 @@ func main() {
     }
 	appLogger.Info("Successfully connected to user gRPC service.")
 
+	// Connect to Phonebook Service
+	appLogger.Info("Connecting to Phonebook Service...", "target", cfg.PhonebookServiceGRPCClientTarget)
+	phonebookConn, err := grpc.Dial(
+		cfg.PhonebookServiceGRPCClientTarget,
+		grpc.WithTransportCredentials(insecure.NewCredentials()), // Use insecure credentials for local dev
+		grpc.WithBlock(), // Block until connection is up or times out
+	)
+	if err != nil {
+		appLogger.Error("Failed to connect to Phonebook service", "error", err)
+		os.Exit(1)
+	}
+	defer phonebookConn.Close()
+	phonebookClient := phonebookPb.NewPhonebookServiceClient(phonebookConn)
+	appLogger.Info("Successfully connected to Phonebook gRPC service.")
+
 	natsClient, err := messagebroker.NewNatsClient(cfg.NATSUrl, "public-api-service", appLogger, false)
 	if err != nil {
-        appLogger.Error("Failed to connect to NATS", "error", err); os.Exit(1)
+        appLogger.Error("Failed to connect to NATS", "error", err)
     }
 	defer natsClient.Close()
 	appLogger.Info("Successfully connected to NATS")
@@ -88,6 +109,7 @@ func main() {
 	// Initialize validator
 	validate := validator.New()
     incomingHandler := incomingHttp.NewIncomingHandler(natsClient, appLogger, validate)
+    phonebookHandler := httptransport.NewPhonebookHandler(phonebookClient, appLogger, validate) // Pass validator
 
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +131,15 @@ func main() {
     // For now, placing it at the root. Consider if it needs a specific path prefix e.g. /callbacks
     r.Post("/incoming/receive/{provider_name}", incomingHandler.HandleDLRCallback)
     r.Post("/incoming/sms/{provider_name}", incomingHandler.HandleIncomingSMSCallback)
+
+    // Phonebook routes (protected)
+    r.Route("/api/v1", func(v1Router chi.Router) { // Using /api/v1 prefix for these resource routes
+        v1Router.Use(authMW)
+        v1Router.Route("/", func(r chi.Router) { // Further nesting if needed, or directly on v1Router
+            phonebookHandler.RegisterRoutes(r) // Register phonebook CRUD routes
+            // Contact routes will be registered on a sub-router like /phonebooks/{phonebookID}/contacts
+        })
+    })
 
 
 	r.Group(func(protected chi.Router) {

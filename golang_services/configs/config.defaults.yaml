@@ -17,3 +17,9 @@ USER_SERVICE_GRPC_CLIENT_TARGET: "user-service:50051"
 # Billing Service
 BILLING_SERVICE_GRPC_PORT: 50052
 BILLING_SERVICE_GRPC_CLIENT_TARGET: "billing-service:50052" # Added (use Docker Compose service name)
+
+# Phonebook Service
+PHONEBOOK_SERVICE_GRPC_PORT: 50051 # Actual internal port phonebook-service listens on (as per its docker-compose APP_GRPC_PORT)
+PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET: "phonebook-service:50051" # public-api connects to this
+# The host port mapping in phonebook-service's docker-compose (e.g., "50054:50051") is for external access to the service,
+# not for inter-service communication within the Docker network.
