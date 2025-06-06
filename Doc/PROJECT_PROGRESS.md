@@ -163,6 +163,7 @@ This document outlines the key implementation steps and progress tracking for re
         *   [x] Implement core logic, domain, repository, and mock adapter for payment gateway.
         *   [x] Implement HTTP webhook endpoint for payment gateway callbacks.
     *   [ ] Implement tariff/pricing logic.
+        *   [x] Define schema and migrations for tariffs and user_tariffs tables.
     *   [ ] Implement `transactions` table updates for all relevant events.
 *   [ ] **Export Service (`export-service`):**
     *   [ ] Basic data export logic for one entity (e.g., outbox messages to CSV).
