@@ -71,10 +71,50 @@ func main() {
 
 
 	outboxRepo := postgres.NewPgOutboxRepository()
-	// Using MockSMSProvider for now
-	mockProvider := provider.NewMockSMSProvider(appLogger, false, 0) // No fail, no delay
 
-	smsAppService := app.NewSMSSendingAppService(outboxRepo, mockProvider, billingServiceClient, natsClient, dbPool, appLogger)
+	// Initialize providers map
+	providers := make(map[string]provider.SMSSenderProvider)
+
+	// Always initialize MockProvider
+	mockProvider := provider.NewMockSMSProvider(appLogger, false, 0) // No fail, no delay
+	providers[mockProvider.GetName()] = mockProvider
+	appLogger.Info("MockSMSProvider initialized and added to providers map.")
+
+	// Initialize Magfa provider if config values are present
+	if cfg.MagfaProviderAPIURL != "" && cfg.MagfaProviderAPIKey != "" && cfg.MagfaProviderSenderID != "" && cfg.MagfaProviderAPIURL != "https_magfa_api_url_here" {
+		magfaProvider := provider.NewMagfaSMSProvider(
+			appLogger,
+			cfg.MagfaProviderAPIURL,
+			cfg.MagfaProviderAPIKey,
+			cfg.MagfaProviderSenderID,
+			nil, // Use default HTTP client in provider
+		)
+		providers[magfaProvider.GetName()] = magfaProvider
+		appLogger.Info("MagfaSMSProvider initialized and added to providers map.")
+	} else {
+		appLogger.Warn("MagfaSMSProvider not initialized due to missing or default placeholder configuration (API URL, Key, or SenderID).")
+	}
+
+	// Ensure default provider is configured
+	if cfg.SMSSendingServiceDefaultProvider == "" {
+		appLogger.Error("Default SMS provider (APP_SMS_SENDING_SERVICE_DEFAULT_PROVIDER) is not configured.")
+		// Decide if this is fatal. For now, it might try to run with an empty default if not checked in app service.
+		// It's better to exit if no valid default provider can be determined.
+		// For safety, let's set a fallback if empty, though config validation is better.
+		cfg.SMSSendingServiceDefaultProvider = mockProvider.GetName() // Fallback to mock
+		appLogger.Warn("Default SMS provider falling back to mock provider as none was configured.", "default_provider", cfg.SMSSendingServiceDefaultProvider)
+	}
+
+
+	smsAppService := app.NewSMSSendingAppService(
+		outboxRepo,
+		providers,
+		cfg.SMSSendingServiceDefaultProvider,
+		billingServiceClient,
+		natsClient,
+		dbPool,
+		appLogger,
+	)
 
 	// Start consuming NATS jobs
     // The context passed to StartConsumingJobs should ideally be one that can be cancelled on shutdown.

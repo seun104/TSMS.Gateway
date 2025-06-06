@@ -32,31 +32,34 @@ type NATSJobPayload struct {
 
 // SMSSendingAppService orchestrates the SMS sending process.
 type SMSSendingAppService struct {
-	outboxRepo      repository.OutboxRepository
-	smsProvider     provider.SMSSenderProvider // Currently MockProvider
-	billingClient   billingservice.BillingInternalServiceClient
-	natsClient      *messagebroker.NatsClient
-    dbPool          *pgxpool.Pool // For starting transactions
-	logger          *slog.Logger
-	natsSub         *nats.Subscription // To manage the NATS subscription
+	outboxRepo          repository.OutboxRepository
+	providers           map[string]provider.SMSSenderProvider // Map of available providers
+	defaultProviderName string                                // Name of the default provider
+	billingClient       billingservice.BillingInternalServiceClient
+	natsClient          *messagebroker.NatsClient
+	dbPool              *pgxpool.Pool // For starting transactions
+	logger              *slog.Logger
+	natsSub             *nats.Subscription // To manage the NATS subscription
 }
 
 // NewSMSSendingAppService creates a new SMSSendingAppService.
 func NewSMSSendingAppService(
 	outboxRepo repository.OutboxRepository,
-	smsProvider provider.SMSSenderProvider,
+	providers map[string]provider.SMSSenderProvider, // Updated
+	defaultProviderName string, // Added
 	billingClient billingservice.BillingInternalServiceClient,
 	natsClient *messagebroker.NatsClient,
-    dbPool *pgxpool.Pool,
+	dbPool *pgxpool.Pool,
 	logger *slog.Logger,
 ) *SMSSendingAppService {
 	return &SMSSendingAppService{
-		outboxRepo:      outboxRepo,
-		smsProvider:     smsProvider,
-		billingClient:   billingClient,
-		natsClient:      natsClient,
-        dbPool:          dbPool,
-		logger:          logger.With("service", "sms_sending_app"),
+		outboxRepo:          outboxRepo,
+		providers:           providers, // Updated
+		defaultProviderName: defaultProviderName, // Added
+		billingClient:       billingClient,
+		natsClient:          natsClient,
+		dbPool:              dbPool,
+		logger:              logger.With("service", "sms_sending_app"),
 	}
 }
 
@@ -162,30 +165,50 @@ func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPay
             Content:           outboxMsg.Content,
             UserData:          outboxMsg.UserData,
         }
-        s.logger.InfoContext(ctx, "Sending SMS via provider", "provider", s.smsProvider.GetName(), "recipient", outboxMsg.Recipient)
+
+		// Select provider (using default for now, routing logic can be added later)
+		selectedProvider, ok := s.providers[s.defaultProviderName]
+		if !ok || selectedProvider == nil {
+			s.logger.ErrorContext(ctx, "Default SMS provider not found or not configured", "provider_name", s.defaultProviderName, "outbox_message_id", outboxMsg.ID)
+			errMsg := fmt.Sprintf("SMS provider '%s' not found/configured", s.defaultProviderName)
+			sentAt := time.Now()
+			if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedConfiguration, nil, nil, sentAt, &errMsg); errUpdate != nil {
+				s.logger.ErrorContext(ctx, "Failed to update outbox after provider configuration error", "error", errUpdate, "id", outboxMsg.ID)
+			}
+			return fmt.Errorf(errMsg) // Stop processing this job
+		}
+        s.logger.InfoContext(ctx, "Sending SMS via provider", "provider", selectedProvider.GetName(), "recipient", outboxMsg.Recipient, "outbox_message_id", outboxMsg.ID)
 
         providerCtx, providerCancel := context.WithTimeout(ctx, 30*time.Second) // Timeout for provider call
         defer providerCancel()
-        providerResponse, sendErr := s.smsProvider.Send(providerCtx, sendDetails)
+        providerResponse, sendErr := selectedProvider.Send(providerCtx, sendDetails)
         sentAt := time.Now()
 
         // 4. Update OutboxMessage based on provider response
         if sendErr != nil {
-            s.logger.ErrorContext(ctx, "Failed to send SMS via provider", "error", sendErr, "provider", s.smsProvider.GetName())
+            s.logger.ErrorContext(ctx, "Failed to send SMS via provider", "error", sendErr, "provider", selectedProvider.GetName(), "outbox_message_id", outboxMsg.ID)
             errMsg := sendErr.Error()
             providerStatusStr := ""
             if providerResponse != nil { // Provider might return a response even on error
                 providerStatusStr = providerResponse.ProviderStatus
             }
-            return s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedProviderSubmission,
-                nil,
-                &providerStatusStr,
-                sentAt, &errMsg)
+            // Use existing tx for this update
+            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedProviderSubmission, nil, &providerStatusStr, sentAt, &errMsg); errUpdate != nil {
+                s.logger.ErrorContext(ctx, "Failed to update outbox after provider send failure", "error", errUpdate, "id", outboxMsg.ID)
+            }
+            // Return sendErr to ensure the transaction is rolled back if this is considered a true failure for the job.
+            // Or, if the update was successful, and this is just a provider failure to be logged, return nil for tx.
+            // For now, let's assume provider failure means the job processing failed overall.
+            return fmt.Errorf("provider send error for %s: %w", selectedProvider.GetName(), sendErr)
         }
 
-        s.logger.InfoContext(ctx, "SMS submitted to provider successfully", "provider_msg_id", providerResponse.ProviderMessageID)
-        return s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusSentToProvider,
-            &providerResponse.ProviderMessageID, &providerResponse.ProviderStatus, sentAt, nil)
+        s.logger.InfoContext(ctx, "SMS submitted to provider successfully", "provider", selectedProvider.GetName(), "provider_msg_id", providerResponse.ProviderMessageID, "outbox_message_id", outboxMsg.ID)
+        // Use existing tx for this update
+        if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusSentToProvider, &providerResponse.ProviderMessageID, &providerResponse.ProviderStatus, sentAt, nil); errUpdate != nil {
+            s.logger.ErrorContext(ctx, "Failed to update outbox after successful provider submission", "error", errUpdate, "id", outboxMsg.ID)
+            return fmt.Errorf("db update (post send info) failed: %w", errUpdate)
+        }
+        return nil // Transaction successful
     })
 
     return txErr

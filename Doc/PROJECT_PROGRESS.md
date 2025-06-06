@@ -154,6 +154,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Implement `/scheduled_messages` CRUD endpoints (interacts with `scheduler-service`).
 *   [ ] **SMS Sending Service (`sms-sending-service`):**
     *   [ ] Implement adapters for remaining SMS providers.
+        *   [x] Implement adapter for Magfa provider.
     *   [ ] Enhance routing logic.
 *   [ ] **Inbound Processor Service (`inbound-processor-service`):**
     *   [ ] Implement advanced message parsing rules (keywords, polls, etc.).

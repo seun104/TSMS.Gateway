@@ -28,3 +28,12 @@ PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET: "phonebook-service:50051" # public-api con
 SCHEDULER_POLLING_INTERVAL: "60s" # How often the scheduler polls for due jobs
 SCHEDULER_JOB_BATCH_SIZE: 10      # Max number of jobs to acquire in one poll cycle
 SCHEDULER_MAX_RETRY: 3            # Max number of retries for a failed job
+SCHEDULER_SERVICE_GRPC_CLIENT_TARGET: "scheduler-service:50053" # Target for scheduler service gRPC
+
+# SMS Sending Service
+SMS_SENDING_SERVICE_DEFAULT_PROVIDER: "mock" # or "magfa" once implemented
+
+# Magfa SMS Provider (example)
+MAGFA_PROVIDER_API_URL: "https_magfa_api_url_here"
+MAGFA_PROVIDER_API_KEY: "your_magfa_api_key_here"
+MAGFA_PROVIDER_SENDER_ID: "your_magfa_sender_id_here"
