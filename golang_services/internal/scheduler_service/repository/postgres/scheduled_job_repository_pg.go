@@ -11,7 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v4"
 	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/your-repo/project/internal/scheduler_service/domain"
+	"github.com/AradIT/Arad.SMS.Gateway/golang_services/internal/scheduler_service/domain"
+	"strings"
+	"fmt"
 )
 
 type PgScheduledJobRepository struct {
@@ -191,4 +193,131 @@ func (r *PgScheduledJobRepository) MarkForRetry(ctx context.Context, id uuid.UUI
 	}
 	r.logger.InfoContext(ctx, "Scheduled job marked for retry", "job_id", id, "next_retry_at", nextRetryTime)
 	return nil
+}
+
+func (r *PgScheduledJobRepository) Update(ctx context.Context, job *domain.ScheduledJob) error {
+	query := `
+		UPDATE scheduled_jobs
+		SET user_id = $1, job_type = $2, payload = $3, scheduled_at = $4, status = $5,
+		    retry_count = $6, error_message = $7, run_at = $8, processed_at = $9, updated_at = $10
+		WHERE id = $11
+	`
+	job.UpdatedAt = time.Now().UTC()
+	_, err := r.db.Exec(ctx, query,
+		job.UserID, job.JobType, job.Payload, job.ScheduledAt, job.Status,
+		job.RetryCount, job.Error, job.RunAt, job.ProcessedAt, job.UpdatedAt,
+		job.ID,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			r.logger.WarnContext(ctx, "Scheduled job not found for update", "job_id", job.ID)
+			return domain.ErrNotFound
+		}
+		r.logger.ErrorContext(ctx, "Error updating scheduled job", "error", err, "job_id", job.ID)
+		return err
+	}
+	r.logger.InfoContext(ctx, "Scheduled job updated successfully", "job_id", job.ID)
+	return nil
+}
+
+func (r *PgScheduledJobRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	query := `DELETE FROM scheduled_jobs WHERE id = $1`
+	tag, err := r.db.Exec(ctx, query, id)
+	if err != nil {
+		r.logger.ErrorContext(ctx, "Error deleting scheduled job", "error", err, "job_id", id)
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		r.logger.WarnContext(ctx, "Scheduled job not found for deletion", "job_id", id)
+		return domain.ErrNotFound
+	}
+	r.logger.InfoContext(ctx, "Scheduled job deleted successfully", "job_id", id)
+	return nil
+}
+
+func (r *PgScheduledJobRepository) List(ctx context.Context, userID uuid.NullUUID, status string, jobType string, pageSize int, pageNumber int) ([]*domain.ScheduledJob, int, error) {
+	var baseQuery strings.Builder
+	baseQuery.WriteString("SELECT id, user_id, job_type, payload, scheduled_at, status, run_at, processed_at, error_message, retry_count, created_at, updated_at FROM scheduled_jobs")
+
+	var countQueryBuilder strings.Builder
+	countQueryBuilder.WriteString("SELECT COUNT(*) FROM scheduled_jobs")
+
+	var conditions []string
+	var args []interface{}
+	argCounter := 1
+
+	if userID.Valid {
+		conditions = append(conditions, fmt.Sprintf("user_id = $%d", argCounter))
+		args = append(args, userID.UUID)
+		argCounter++
+	}
+	if status != "" {
+		conditions = append(conditions, fmt.Sprintf("status = $%d", argCounter))
+		args = append(args, status)
+		argCounter++
+	}
+	if jobType != "" {
+		conditions = append(conditions, fmt.Sprintf("job_type = $%d", argCounter))
+		args = append(args, jobType)
+		argCounter++
+	}
+
+	if len(conditions) > 0 {
+		whereClause := " WHERE " + strings.Join(conditions, " AND ")
+		baseQuery.WriteString(whereClause)
+		countQueryBuilder.WriteString(whereClause)
+	}
+
+	// Get total count
+	var totalCount int
+	err := r.db.QueryRow(ctx, countQueryBuilder.String(), args...).Scan(&totalCount)
+	if err != nil {
+		r.logger.ErrorContext(ctx, "Error counting scheduled jobs", "error", err)
+		return nil, 0, err
+	}
+
+	if totalCount == 0 {
+		return []*domain.ScheduledJob{}, 0, nil
+	}
+
+	// Add sorting, pagination for the actual list query
+	baseQuery.WriteString(" ORDER BY created_at DESC") // Default sort
+	if pageSize > 0 && pageNumber > 0 {
+		offset := (pageNumber - 1) * pageSize
+		baseQuery.WriteString(fmt.Sprintf(" LIMIT $%d OFFSET $%d", argCounter, argCounter+1))
+		args = append(args, pageSize, offset)
+	} else if pageSize > 0 { // if only pageSize is provided, treat as limit for first page
+		baseQuery.WriteString(fmt.Sprintf(" LIMIT $%d", argCounter))
+		args = append(args, pageSize)
+	}
+
+
+	rows, err := r.db.Query(ctx, baseQuery.String(), args...)
+	if err != nil {
+		r.logger.ErrorContext(ctx, "Error listing scheduled jobs", "error", err)
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var jobs []*domain.ScheduledJob
+	for rows.Next() {
+		job := &domain.ScheduledJob{}
+		var payloadJSON []byte
+		if err := rows.Scan(
+			&job.ID, &job.UserID, &job.JobType, &payloadJSON, &job.ScheduledAt, &job.Status,
+			&job.RunAt, &job.ProcessedAt, &job.Error, &job.RetryCount, &job.CreatedAt, &job.UpdatedAt,
+		); err != nil {
+			r.logger.ErrorContext(ctx, "Error scanning scheduled job row during list", "error", err)
+			return nil, 0, err
+		}
+		job.Payload = json.RawMessage(payloadJSON)
+		jobs = append(jobs, job)
+	}
+
+	if err := rows.Err(); err != nil {
+		r.logger.ErrorContext(ctx, "Error iterating scheduled job rows during list", "error", err)
+		return nil, 0, err
+	}
+
+	return jobs, totalCount, nil
 }

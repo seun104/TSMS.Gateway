@@ -131,27 +131,27 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Associate with user/private number. (Implemented in `SMSProcessor` using `PrivateNumberRepository`)
 
 ## Phase 4: Phonebook & Advanced Features
-(All items below are [ ])
-*   [ ] **Phonebook Service (`phonebook-service`):**
+*   [x] **Phonebook Service (`phonebook-service`):**
     *   [x] Initial directory structure, `main.go` (with gRPC setup placeholders), Makefile, and docker-compose.yml entry created.
     *   [x] Define `Phonebook`, `Contact` domain models. (`internal/phonebook_service/domain/phonebook_models.go`)
     *   [x] Implement PostgreSQL schema & migrations for `phonebooks`, `contacts`, `phonebook_contacts`. (`migrations/000006_create_phonebook_tables.up.sql` & `.down.sql`)
     *   [x] Implement `PhonebookRepository`, `ContactRepository` interfaces and PostgreSQL implementations. (`domain/repositories.go`, `repository/postgres/*_repository_pg.go`)
     *   [x] Implement gRPC interface for CRUD operations. (`api/proto/phonebookservice/phonebook.proto` defined and Go code generated)
     *   [x] Implement gRPC server logic. (`app/phonebook_app.go`, `adapters/grpc/server.go`, and `cmd/phonebook_service/main.go` updated)
-*   [ ] **Public API Service (`public-api-service`):**
+*   [x] **Public API Service (`public-api-service`):**
     *   [x] Setup gRPC client for `phonebook-service`. (Configuration added, client initialized in `cmd/public_api_service/main.go`, placeholder handler created)
     *   [x] Define HTTP DTOs for Phonebook and Contact operations (`internal/public_api_service/transport/http/phonebook_dtos.go`).
     *   [x] Implement all `/phonebooks` and `/contacts` CRUD endpoints (calling `phonebook-service` via gRPC). (Phonebook & Contact CRUD handlers implemented in `phonebook_handler.go` and routes registered in `main.go`)
-*   [ ] **Scheduler Service (`scheduler-service`):**
+*   [x] **Scheduler Service (`scheduler-service`):**
     *   [x] Initial directory structure, `main.go`, Makefile, and docker-compose.yml entry created.
     *   [x] Define `ScheduledJob` model. (`internal/scheduler_service/domain/scheduled_job.go`)
     *   [x] Implement PostgreSQL schema & migrations for `scheduled_jobs`. (`migrations/000007_create_scheduled_jobs_table.up.sql` & `.down.sql`)
     *   [x] Implement `ScheduledJobRepository` interface and PostgreSQL implementation. (`domain/scheduled_job_repository.go`, `repository/postgres/scheduled_job_repository_pg.go`)
     *   [x] Implement cron job logic to check `scheduled_jobs` table. (`app/job_poller.go` created and integrated into `main.go`)
     *   [x] NATS: Publish "send SMS" jobs to NATS for due scheduled messages. (Implemented in `JobPoller` for "sms" job type)
-*   [ ] **Public API Service (`public-api-service`):**
-    *   [ ] Implement `/scheduled_messages` CRUD endpoints (interacts with `scheduler-service`).
+    *   [x] Implement gRPC interface for CRUD operations on scheduled messages.
+*   [x] **Public API Service (`public-api-service`):**
+    *   [x] Implement `/scheduled_messages` CRUD endpoints (interacts with `scheduler-service`).
 *   [ ] **SMS Sending Service (`sms-sending-service`):**
     *   [ ] Implement adapters for remaining SMS providers.
     *   [ ] Enhance routing logic.

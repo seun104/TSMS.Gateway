@@ -12,6 +12,9 @@ import (
 type ScheduledJobRepository interface {
 	Create(ctx context.Context, job *ScheduledJob) error
 	GetByID(ctx context.Context, id uuid.UUID) (*ScheduledJob, error)
+	Update(ctx context.Context, job *ScheduledJob) error // Added for general updates
+	Delete(ctx context.Context, id uuid.UUID) error      // Added for deletion
+	List(ctx context.Context, userID uuid.NullUUID, status string, jobType string, pageSize int, pageNumber int) ([]*ScheduledJob, int, error) // Added for listing with filters and pagination
 	UpdateStatus(ctx context.Context, id uuid.UUID, status JobStatus, eventTime time.Time, errorMessage sql.NullString, retryIncrement int) error
 	// AcquireDueJobs selects 'pending' or 'retry' jobs that are due,
 	// updates their status to 'processing', sets 'run_at', increments 'retry_count' (if applicable),

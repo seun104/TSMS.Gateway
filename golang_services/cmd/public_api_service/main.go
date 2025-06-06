@@ -23,7 +23,9 @@ import (
 
 	// Import for OutboxRepository implementation
 	outboxRepoImpl "github.com/aradsms/golang_services/internal/sms_sending_service/repository/postgres"
-	phonebookPb "github.com/aradsms/golang_services/api/proto/phonebookservice" // Phonebook gRPC client
+	phonebookPb "github.com/aradsms/golang_services/api/proto/phonebookservice"     // Phonebook gRPC client
+	schedulerClientAdapter "github.com/AradIT/Arad.SMS.Gateway/golang_services/internal/public_api_service/adapters/grpc_clients" // Scheduler gRPC client adapter
+
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
@@ -76,6 +78,23 @@ func main() {
 	phonebookClient := phonebookPb.NewPhonebookServiceClient(phonebookConn)
 	appLogger.Info("Successfully connected to Phonebook gRPC service.")
 
+	// Connect to Scheduler Service
+	// Assuming cfg.SchedulerServiceGRPCClientTarget (e.g., "localhost:50053") exists in public-api-service's config.Config
+	schedulerTargetString := cfg.SchedulerServiceGRPCClientTarget
+	if schedulerTargetString == "" { // Fallback or error if not configured
+		appLogger.Warn("SchedulerService GRPC client target not configured, using default localhost:50053")
+		schedulerTargetString = "localhost:50053" // Default target
+		// Alternatively, could os.Exit(1) if it's a critical dependency without a sensible default
+	}
+	schedulerServiceClient, err := schedulerClientAdapter.NewSchedulerServiceClient(schedulerTargetString, appLogger)
+	if err != nil {
+		appLogger.Error("Failed to initialize SchedulerService client", "error", err)
+		os.Exit(1)
+	}
+	defer schedulerServiceClient.Close()
+	appLogger.Info("SchedulerService client initialized.", "target", schedulerTargetString)
+
+
 	natsClient, err := messagebroker.NewNatsClient(cfg.NATSUrl, "public-api-service", appLogger, false)
 	if err != nil {
         appLogger.Error("Failed to connect to NATS", "error", err)
@@ -110,6 +129,7 @@ func main() {
 	validate := validator.New()
     incomingHandler := incomingHttp.NewIncomingHandler(natsClient, appLogger, validate)
     phonebookHandler := httptransport.NewPhonebookHandler(phonebookClient, appLogger, validate) // Pass validator
+	schedulerHandler := httptransport.NewSchedulerHandler(schedulerServiceClient.GetClient(), appLogger, validate)
 
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +158,11 @@ func main() {
         v1Router.Route("/", func(r chi.Router) { // Further nesting if needed, or directly on v1Router
             phonebookHandler.RegisterRoutes(r) // Register phonebook CRUD routes
             // Contact routes will be registered on a sub-router like /phonebooks/{phonebookID}/contacts
+
+            // Register Scheduler routes under /api/v1/scheduled_messages
+            r.Route("/scheduled_messages", func(sr chi.Router) {
+                schedulerHandler.RegisterRoutes(sr)
+            })
         })
     })
 
