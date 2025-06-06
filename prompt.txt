@@ -1,1 +1,1 @@
-Kindly update the PROJECT_PROGRESS document with tasks completed. Proceed to next step
+As a seasoned software engineer, check for 'PROJECT_PROGRESS.md' and 'GO_POSTGRES_IMPLEMENTATION_PLAN.md' in this repository, to know the part that has been completed and proceed to complete next steps that is yet to be done. Kindly update the 'PROJECT_PROGRESS.md' to indicate what has been completed.
