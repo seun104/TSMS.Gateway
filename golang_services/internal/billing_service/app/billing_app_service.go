@@ -45,26 +45,29 @@ var ErrPaymentGateway = errors.New("payment gateway error")
 type BillingService struct {
 	transactionRepo    repository.TransactionRepository
     userRepo           userRepository.UserRepository
-	paymentIntentRepo  domain.PaymentIntentRepository  // Added
-	paymentGateway     domain.PaymentGatewayAdapter    // Added
+	paymentIntentRepo  domain.PaymentIntentRepository
+	paymentGateway     domain.PaymentGatewayAdapter
+	tariffRepo         domain.TariffRepository // Added
 	dbPool             *pgxpool.Pool
 	logger             *slog.Logger
 }
 
 func NewBillingService(
 	transactionRepo repository.TransactionRepository,
-    userRepo userRepository.UserRepository,
-	paymentIntentRepo domain.PaymentIntentRepository, // Added
-	paymentGateway domain.PaymentGatewayAdapter,    // Added
-    dbPool *pgxpool.Pool,
+	userRepo userRepository.UserRepository,
+	paymentIntentRepo domain.PaymentIntentRepository,
+	paymentGateway domain.PaymentGatewayAdapter,
+	tariffRepo domain.TariffRepository, // Added
+	dbPool *pgxpool.Pool,
 	logger *slog.Logger,
 ) *BillingService {
 	return &BillingService{
 		transactionRepo:   transactionRepo,
-        userRepo:          userRepo,
-		paymentIntentRepo: paymentIntentRepo, // Added
-		paymentGateway:    paymentGateway,    // Added
-        dbPool:            dbPool,
+		userRepo:          userRepo,
+		paymentIntentRepo: paymentIntentRepo,
+		paymentGateway:    paymentGateway,
+		tariffRepo:        tariffRepo, // Added
+		dbPool:            dbPool,
 		logger:            logger.With("service", "billing"),
 	}
 }
@@ -82,107 +85,105 @@ func (s *BillingService) HasSufficientCredit(ctx context.Context, userID string,
 	return user.CreditBalance >= amountToDeduct, nil
 }
 
-// DeductCredit deducts credit from a user and records the transaction.
-// This operation should be transactional.
-func (s *BillingService) DeductCredit(
-	ctx context.Context,
-	userID string,
-	amountToDeduct float64,
-	transactionType domain.TransactionType,
-	description string,
-	relatedMessageID *string,
-) (*domain.Transaction, error) {
-	if amountToDeduct <= 0 {
-		return nil, errors.New("deduction amount must be positive")
+// DeductCreditForSMS calculates the cost of SMS messages and deducts it from the user's balance.
+// It records a debit transaction.
+func (s *BillingService) DeductCreditForSMS(ctx context.Context, userID uuid.UUID, numMessages int, details domain.TransactionDetails) (*domain.Transaction, error) {
+	s.logger.InfoContext(ctx, "Attempting to deduct credit for SMS", "user_id", userID, "num_messages", numMessages)
+
+	if numMessages <= 0 {
+		return nil, errors.New("number of messages must be positive for credit deduction")
 	}
 
-    var createdTransaction *domain.Transaction
-    txErr := pgx.BeginFunc(ctx, s.dbPool, func(tx pgx.Tx) error {
-        // 1. Get current user balance (with FOR UPDATE to lock the row)
-        // Note: pgx.Tx itself doesn't directly offer FOR UPDATE in BeginFunc easily.
-        // A raw SQL query inside the transaction is needed for row-level locking.
-        // Or, trust the application-level logic if concurrent debits for the same user are rare
-        // or handled by optimistic locking / retries.
-        // For simplicity, we'll fetch and then update. A real system needs robust concurrency control here.
+	// 1. Calculate Cost
+	cost, currency, err := s.CalculateSMSCost(ctx, userID, numMessages)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "Failed to calculate SMS cost for credit deduction", "user_id", userID, "num_messages", numMessages, "error", err)
+		return nil, fmt.Errorf("cost calculation failed: %w", err)
+	}
+	s.logger.InfoContext(ctx, "Calculated SMS cost for deduction", "user_id", userID, "cost", cost, "currency", currency)
 
-        // The userRepo methods GetByIDForUpdate and UpdateCreditBalance need to accept pgx.Tx (Querier)
-        // This requires modifying user_service repository interfaces and implementations.
-        // For now, this will be a conceptual placeholder for such methods.
-        // Let's assume they exist and can take `tx` as a Querier.
+	// Cost here is int64 (smallest unit), but Transaction.Amount is float64.
+	// And user.CreditBalance is float64. This needs careful handling of units.
+	// For now, assume cost (int64) can be converted to float64 for deduction.
+	// A better system would use decimal types or operate consistently in smallest units.
+	costFloat := float64(cost)
 
-        // user, err := s.userRepo.GetByIDForUpdate(ctx, tx, userID) // Assume GetByIDForUpdate locks the user row
-        // This call signature needs userRepo to be adapted for Querier, or use a specific method.
-        // For now, let's assume a conceptual GetUserForUpdate method that uses the transaction.
-        // This needs to be properly implemented in user_service's repository.
-        // We'll simulate this by fetching user first, then trying to update.
-        // This is NOT transactionally safe without proper locking (SELECT ... FOR UPDATE).
+	var createdTransaction *domain.Transaction
+	txErr := pgx.BeginFunc(ctx, s.dbPool, func(tx pgx.Tx) error {
+		// Fetch current user for BalanceBefore. This is illustrative.
+		// In a robust system, the gRPC call to user-service to deduct credit might return balances
+		// or user-service itself creates the transaction via a call back to billing-service.
+		// For now, we fetch user, then call user-service to deduct, then record transaction.
+		// This has distributed transaction challenges.
+		user, err := s.userRepo.GetByID(ctx, userID.String()) // UserID is string for userRepo
+		if err != nil {
+			if errors.Is(err, userRepository.ErrUserNotFound) { // Assuming user repo has specific error
+				return ErrUserNotFoundForBilling
+			}
+			s.logger.ErrorContext(ctx, "Failed to get user for credit deduction", "error", err, "user_id", userID)
+			return fmt.Errorf("user retrieval for deduction failed: %w", err)
+		}
 
-        // Placeholder for locking and fetching user - this part needs proper implementation
-        // with userRepo methods that accept a transaction (Querier).
-        // For this subtask, we proceed with the logical flow, acknowledging this gap.
-        user := &userDomain.User{} // Placeholder
-        var err error
-        // Conceptual: user, err = s.userRepo.GetByIDAndLock(ctx, tx, userID)
-        // If above not possible, then this is not safe:
-        tempUser, err := s.userRepo.GetByID(ctx, userID) // Not using tx here, not ideal
-        if err != nil {
-            if errors.Is(err, userRepository.ErrUserNotFound) {
-                return ErrUserNotFoundForBilling
-            }
-            s.logger.ErrorContext(ctx, "Failed to get user for credit deduction (non-tx)", "error", err, "userID", userID)
-            return fmt.Errorf("user retrieval failed (non-tx): %w", err)
-        }
-        user = tempUser // Assign to user
+		if user.CreditBalance < costFloat {
+			s.logger.WarnContext(ctx, "Insufficient credit for SMS cost", "user_id", userID, "current_balance", user.CreditBalance, "cost", costFloat)
+			return ErrInsufficientCredit
+		}
 
-        if user.CreditBalance < amountToDeduct {
-            return ErrInsufficientCredit
-        }
+		// Call user-service to update balance. This is a gRPC call.
+		// Assume userRepo.Update handles the balance deduction.
+		// This is where the distributed transaction complexity lies.
+		// If this call succeeds but the local transaction record fails, inconsistency occurs.
+		updatedUser := *user
+		updatedUser.CreditBalance -= costFloat // Deduct cost
+		updatedUser.UpdatedAt = time.Now().UTC()
 
-        balanceBefore := user.CreditBalance
-        balanceAfter := user.CreditBalance - amountToDeduct
-        // user.CreditBalance = balanceAfter // This updates local copy, real update below
-        // user.UpdatedAt = time.Now()
-
-        // 2. Update user's balance
-        // Conceptual: err = s.userRepo.UpdateCreditBalanceInTx(ctx, tx, userID, balanceAfter)
-        // If userRepo cannot accept tx, this is not part of the same DB transaction.
-        // This is a major simplification and architectural consideration.
-        // For now, we assume Update updates the balance and other fields.
-        tempUserForUpdate := *user // Create a copy to update
-        tempUserForUpdate.CreditBalance = balanceAfter
-        tempUserForUpdate.UpdatedAt = time.Now()
-        if err := s.userRepo.Update(ctx, &tempUserForUpdate); err != nil { // Not using tx here, not ideal
-            s.logger.ErrorContext(ctx, "Failed to update user credit balance (non-tx)", "error", err, "userID", userID)
-            return fmt.Errorf("balance update failed (non-tx): %w", err)
-        }
+		// Using s.userRepo.Update method, which is a gRPC client method.
+		// This is not part of the local pgx.Tx transaction.
+		err = s.userRepo.Update(ctx, &updatedUser)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "Failed to deduct user credit via user service", "user_id", userID, "cost", costFloat, "error", err)
+			// If this fails, we do NOT proceed to create a local transaction record.
+			return fmt.Errorf("user service credit deduction failed: %w", err)
+		}
+		s.logger.InfoContext(ctx, "Successfully deducted credit via user service", "user_id", userID, "new_balance", updatedUser.CreditBalance)
 
 
-        // 3. Record the transaction using the transaction (tx)
-        txn := &domain.Transaction{
-            UserID:              userID,
-            Type:                transactionType,
-            Amount:              -amountToDeduct, // Store as negative for deduction
-            CurrencyCode:        user.CurrencyCode, // Assuming user has CurrencyCode
-            Description:         description,
-            RelatedMessageID:    relatedMessageID,
-            BalanceBefore:       balanceBefore,
-            BalanceAfter:        balanceAfter,
-        }
+		// Create local transaction record within the pgx.Tx
+		transaction := &domain.Transaction{
+			// ID will be set by Create method
+			UserID:         userID.String(),
+			Type:           domain.TransactionTypeDebit, // Or TransactionTypeSMSCharge
+			Amount:         costFloat,                   // Store actual cost (positive value, type indicates debit)
+			CurrencyCode:   currency,
+			Description:    details.Description,
+			RelatedMessageID: &details.ReferenceID, // Assuming ReferenceID is message ID
+			BalanceBefore:  user.CreditBalance,
+			BalanceAfter:   updatedUser.CreditBalance,
+			// CreatedAt will be set by Create method
+		}
 
-        createdTransaction, err = s.transactionRepo.Create(ctx, tx, txn) // This uses the tx
-        if err != nil {
-            s.logger.ErrorContext(ctx, "Failed to create transaction record", "error", err, "userID", userID)
-            return fmt.Errorf("transaction recording failed: %w", err)
-        }
-        return nil // Commit transaction
-    })
-
+		createdTx, err := s.transactionRepo.Create(ctx, tx, transaction)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "Failed to create debit transaction record", "user_id", userID, "error", err)
+			// IMPORTANT: User's credit was deducted by user-service, but local txn log failed.
+			// This requires a compensation mechanism or robust reconciliation.
+			// For now, the error will cause tx.Rollback(), but user's balance is already changed.
+			return fmt.Errorf("transaction recording failed: %w", err)
+		}
+		createdTransaction = createdTx
+		return nil // Commit local transaction
+	})
 
 	if txErr != nil {
-		return nil, txErr // Return the error from the transaction block
+		// If txErr is from user service call or balance check, createdTransaction will be nil.
+		// If txErr is from local transaction commit or transactionRepo.Create, then also need to handle inconsistency.
+		return nil, txErr
 	}
+
+	s.logger.InfoContext(ctx, "User credit deducted successfully and transaction recorded", "user_id", userID, "cost", costFloat, "transaction_id", createdTransaction.ID)
 	return createdTransaction, nil
 }
+
 
 // CreatePaymentIntent creates a payment intent with the gateway and stores a local record.
 func (s *BillingService) CreatePaymentIntent(ctx context.Context, userID uuid.UUID, amount int64, currency string, email string, description string) (*domain.CreateIntentResponse, string, error) {
@@ -414,4 +415,45 @@ func (s *BillingService) HandlePaymentWebhook(ctx context.Context, rawPayload []
 
 	s.logger.InfoContext(ctx, "Webhook processed successfully for payment intent", "gateway_pi_id", event.GatewayPaymentIntentID)
 	return nil
+}
+
+// CalculateSMSCost determines the cost of sending a number of SMS messages for a given user.
+func (s *BillingService) CalculateSMSCost(ctx context.Context, userID uuid.UUID, numMessages int) (cost int64, currency string, err error) {
+	if numMessages <= 0 {
+		return 0, "", errors.New("number of messages must be positive")
+	}
+
+	tariff, err := s.tariffRepo.GetActiveUserTariff(ctx, userID)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "Error fetching active user tariff for cost calculation", "user_id", userID, "error", err)
+		return 0, "", fmt.Errorf("could not retrieve tariff for user %s: %w", userID, err)
+	}
+
+	if tariff == nil { // No user-specific tariff, try default
+		s.logger.InfoContext(ctx, "No active user tariff found, attempting to use default tariff for cost calculation", "user_id", userID)
+		tariff, err = s.tariffRepo.GetDefaultActiveTariff(ctx)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "Error fetching default active tariff for cost calculation", "error", err)
+			return 0, "", fmt.Errorf("could not retrieve default tariff: %w", err)
+		}
+		if tariff == nil {
+			s.logger.ErrorContext(ctx, "No applicable tariff found for cost calculation: No user tariff and no default system tariff available.", "user_id", userID)
+			return 0, "", errors.New("no applicable tariff found for cost calculation (user or default)")
+		}
+	}
+
+	if !tariff.IsActive { // Should be caught by repo methods, but double check
+		s.logger.ErrorContext(ctx, "Tariff selected for cost calculation is not active", "user_id", userID, "tariff_id", tariff.ID, "tariff_name", tariff.Name)
+		return 0, "", fmt.Errorf("selected tariff '%s' is not active", tariff.Name)
+	}
+
+	calculatedCost := tariff.PricePerSMS * int64(numMessages)
+	s.logger.InfoContext(ctx, "Calculated SMS cost",
+		"user_id", userID,
+		"tariff_name", tariff.Name,
+		"price_per_sms", tariff.PricePerSMS,
+		"num_messages", numMessages,
+		"total_cost", calculatedCost,
+		"currency", tariff.Currency)
+	return calculatedCost, tariff.Currency, nil
 }

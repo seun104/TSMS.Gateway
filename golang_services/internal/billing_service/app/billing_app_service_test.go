@@ -117,16 +117,44 @@ func (m *MockPaymentGatewayAdapter) HandleWebhookEvent(ctx context.Context, rawP
 	return args.Get(0).(*domain.PaymentGatewayEvent), args.Error(1)
 }
 
+type MockTariffRepository struct {
+	mock.Mock
+}
+
+func (m *MockTariffRepository) GetTariffByID(ctx context.Context, id uuid.UUID) (*domain.Tariff, error) {
+	args := m.Called(ctx, id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*domain.Tariff), args.Error(1)
+}
+
+func (m *MockTariffRepository) GetActiveUserTariff(ctx context.Context, userID uuid.UUID) (*domain.Tariff, error) {
+	args := m.Called(ctx, userID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*domain.Tariff), args.Error(1)
+}
+
+func (m *MockTariffRepository) GetDefaultActiveTariff(ctx context.Context) (*domain.Tariff, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*domain.Tariff), args.Error(1)
+}
+
+
 type MockPgxPoolBilling struct {
 	mock.Mock
 }
 
 func (m *MockPgxPoolBilling) BeginFunc(ctx context.Context, f func(pgx.Tx) error) error {
 	args := m.Called(ctx, f)
-	// Simplified: execute f with nil Tx. Real tests might need more elaborate pgx.Tx mock.
-	var mockTx pgx.Tx // This should be a mocked pgx.Tx if tx methods are called
+	var mockTx pgx.Tx
 	if fn, ok := f.(func(pgx.Tx) error); ok {
-		return fn(mockTx) // Pass the mockTx or nil
+		return fn(mockTx)
 	}
 	return args.Error(0)
 }
@@ -139,6 +167,7 @@ type billingAppTestComponents struct {
 	mockUserRepo      *MockUserRepository
 	mockPIntentRepo   *MockPaymentIntentRepository
 	mockGateway       *MockPaymentGatewayAdapter
+	mockTariffRepo    *MockTariffRepository // Added
 	mockDbPool        *MockPgxPoolBilling
 	logger            *slog.Logger
 }
@@ -149,6 +178,7 @@ func setupBillingAppTest(t *testing.T) billingAppTestComponents {
 	mockUserRepo := new(MockUserRepository)
 	mockPIntentRepo := new(MockPaymentIntentRepository)
 	mockGateway := new(MockPaymentGatewayAdapter)
+	mockTariffRepo := new(MockTariffRepository) // Added
 	mockDbPool := new(MockPgxPoolBilling)
 
 	service := NewBillingService(
@@ -156,12 +186,14 @@ func setupBillingAppTest(t *testing.T) billingAppTestComponents {
 		mockUserRepo,
 		mockPIntentRepo,
 		mockGateway,
+		mockTariffRepo, // Added
 		mockDbPool,
 		logger,
 	)
 	return billingAppTestComponents{
 		service: service, mockTxnRepo: mockTxnRepo, mockUserRepo: mockUserRepo,
 		mockPIntentRepo: mockPIntentRepo, mockGateway: mockGateway,
+		mockTariffRepo: mockTariffRepo, // Added
 		mockDbPool: mockDbPool, logger: logger,
 	}
 }
@@ -299,4 +331,154 @@ func TestBillingService_HandlePaymentWebhook_Success(t *testing.T) {
 //                         transaction creation error (txnRepo.Create fails), PI update error (repo.Update fails),
 //                         different event types (failed, cancelled), DB error from BeginFunc.
 // - Test currency/amount unit conversions if they were part of the logic.
+
+func TestBillingService_CalculateSMSCost(t *testing.T) {
+	comps := setupBillingAppTest(t)
+	userID := uuid.New()
+	numMessages := 3
+
+	activeUserTariff := &domain.Tariff{ID: uuid.New(), Name: "UserSpecial", PricePerSMS: 50, Currency: "USD", IsActive: true}
+	defaultActiveTariff := &domain.Tariff{ID: uuid.New(), Name: "Default", PricePerSMS: 70, Currency: "USD", IsActive: true}
+
+	t.Run("UserHasActiveTariff", func(t *testing.T) {
+		comps.mockTariffRepo.On("GetActiveUserTariff", mock.Anything, userID).Return(activeUserTariff, nil).Once()
+
+		cost, currency, err := comps.service.CalculateSMSCost(context.Background(), userID, numMessages)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(150), cost) // 50 * 3
+		assert.Equal(t, "USD", currency)
+		comps.mockTariffRepo.AssertExpectations(t)
+		// Reset mock for next sub-test if using the same comps.mockTariffRepo instance and On().Once()
+		// However, setupBillingAppTest creates new mocks each time it's called if we were to call it per sub-test.
+		// For this structure, ensure mock is reset or expectations are specific if comps is shared.
+		// Re-init mock for safety in subtests if not using t.Run with fresh setups.
+		// For now, assuming independent mock calls due to .Once() or fresh mock instances per sub-test.
+	})
+
+	t.Run("UserHasNoActiveTariff_UsesDefault", func(t *testing.T) {
+		// Need fresh mock instance for tariffRepo if On().Once() was used and comps is not re-created
+		freshComps := setupBillingAppTest(t) // Creates fresh mocks
+
+		freshComps.mockTariffRepo.On("GetActiveUserTariff", mock.Anything, userID).Return(nil, nil).Once()
+		freshComps.mockTariffRepo.On("GetDefaultActiveTariff", mock.Anything).Return(defaultActiveTariff, nil).Once()
+
+		cost, currency, err := freshComps.service.CalculateSMSCost(context.Background(), userID, numMessages)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(210), cost) // 70 * 3
+		assert.Equal(t, "USD", currency)
+		freshComps.mockTariffRepo.AssertExpectations(t)
+	})
+
+	t.Run("NoUserTariff_NoDefaultTariff", func(t *testing.T) {
+		freshComps := setupBillingAppTest(t)
+		freshComps.mockTariffRepo.On("GetActiveUserTariff", mock.Anything, userID).Return(nil, nil).Once()
+		freshComps.mockTariffRepo.On("GetDefaultActiveTariff", mock.Anything).Return(nil, nil).Once() // No default found
+
+		_, _, err := freshComps.service.CalculateSMSCost(context.Background(), userID, numMessages)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no applicable tariff found")
+		freshComps.mockTariffRepo.AssertExpectations(t)
+	})
+
+    t.Run("ErrorFetchingUserTariff", func(t *testing.T) {
+        freshComps := setupBillingAppTest(t)
+        dbErr := errors.New("db error fetching user tariff")
+        freshComps.mockTariffRepo.On("GetActiveUserTariff", mock.Anything, userID).Return(nil, dbErr).Once()
+
+        _, _, err := freshComps.service.CalculateSMSCost(context.Background(), userID, numMessages)
+        assert.Error(t, err)
+        assert.Contains(t, err.Error(), dbErr.Error())
+        freshComps.mockTariffRepo.AssertExpectations(t)
+    })
+
+    t.Run("ErrorFetchingDefaultTariff", func(t *testing.T) {
+        freshComps := setupBillingAppTest(t)
+        dbErr := errors.New("db error fetching default tariff")
+        freshComps.mockTariffRepo.On("GetActiveUserTariff", mock.Anything, userID).Return(nil, nil).Once()
+        freshComps.mockTariffRepo.On("GetDefaultActiveTariff", mock.Anything).Return(nil, dbErr).Once()
+
+        _, _, err := freshComps.service.CalculateSMSCost(context.Background(), userID, numMessages)
+        assert.Error(t, err)
+        assert.Contains(t, err.Error(), dbErr.Error())
+        freshComps.mockTariffRepo.AssertExpectations(t)
+    })
+
+	t.Run("InactiveTariffSelected", func(t *testing.T) {
+        // This scenario depends on repository methods returning only active tariffs.
+        // If GetActiveUserTariff or GetDefaultActiveTariff could return an inactive one (which they shouldn't based on their SQL),
+        // then CalculateSMSCost's explicit IsActive check would be hit.
+        // For now, repository methods are expected to only return active ones.
+        // If a test needs to check the service layer's IsActive check, the mock repo would return an Inactive tariff.
+		freshComps := setupBillingAppTest(t)
+        inactiveTariff := &domain.Tariff{ID: uuid.New(), Name: "InactiveSpecial", PricePerSMS: 10, Currency: "USD", IsActive: false}
+        freshComps.mockTariffRepo.On("GetActiveUserTariff", mock.Anything, userID).Return(inactiveTariff, nil).Once()
+
+        _, _, err := freshComps.service.CalculateSMSCost(context.Background(), userID, numMessages)
+        assert.Error(t, err)
+        assert.Contains(t, err.Error(), "selected tariff 'InactiveSpecial' is not active")
+        freshComps.mockTariffRepo.AssertExpectations(t)
+    })
+}
+
+func TestBillingService_DeductCreditForSMS_Success(t *testing.T) {
+    comps := setupBillingAppTest(t)
+    userID := uuid.New()
+    numMessages := 2
+    messageRefID := "msg_" + uuid.New().String()
+
+    userTariff := &domain.Tariff{ID: uuid.New(), Name: "Standard", PricePerSMS: 75, Currency: "XYZ", IsActive: true} // 75 units per SMS
+    expectedCost := int64(150) // 75 * 2
+	expectedCostFloat := float64(expectedCost)
+
+    mockUser := &userDomain.User{ID: userID.String(), Username: "costlyUser", CreditBalance: 500.0, CurrencyCode: "XYZ"}
+
+	// Mock DB transaction
+	comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+		Run(func(args mock.Arguments) {
+			fn := args.Get(1).(func(pgx.Tx) error)
+			assert.NoError(t, fn(nil)) // Expect inner function to succeed
+		}).Return(nil).Once() // Overall transaction succeeds
+
+
+    // Mock GetActiveUserTariff (used by CalculateSMSCost)
+    comps.mockTariffRepo.On("GetActiveUserTariff", mock.Anything, userID).Return(userTariff, nil).Once()
+    // Mock GetUserByID (for BalanceBefore)
+    comps.mockUserRepo.On("GetByID", mock.Anything, userID.String()).Return(mockUser, nil).Once()
+    // Mock UserRepo.Update (gRPC call to user-service)
+    comps.mockUserRepo.On("Update", mock.Anything, mock.MatchedBy(func(u *userDomain.User) bool {
+        return u.ID == userID.String() && u.CreditBalance == (mockUser.CreditBalance - expectedCostFloat)
+    })).Return(nil).Once()
+    // Mock TransactionRepo.Create
+    comps.mockTxnRepo.On("Create", mock.Anything, mock.Anything, mock.MatchedBy(func(txn *domain.Transaction) bool {
+        return txn.UserID == userID.String() &&
+               txn.Type == domain.TransactionTypeDebit &&
+               txn.Amount == expectedCostFloat &&
+               txn.CurrencyCode == userTariff.Currency &&
+               txn.BalanceBefore == mockUser.CreditBalance &&
+               txn.BalanceAfter == (mockUser.CreditBalance - expectedCostFloat) &&
+               txn.RelatedMessageID != nil && *txn.RelatedMessageID == messageRefID
+    })).Return(&domain.Transaction{ID: uuid.NewString()}, nil).Once()
+
+
+    transactionDetails := domain.TransactionDetails{
+        Description: "Charge for SMS",
+        ReferenceID: messageRefID,
+    }
+    createdTx, err := comps.service.DeductCreditForSMS(context.Background(), userID, numMessages, transactionDetails)
+
+    assert.NoError(t, err)
+    assert.NotNil(t, createdTx)
+    comps.mockTariffRepo.AssertExpectations(t)
+    comps.mockUserRepo.AssertExpectations(t)
+    comps.mockTxnRepo.AssertExpectations(t)
+    comps.mockDbPool.AssertExpectations(t)
+}
+
+// TODO: Add more tests for DeductCreditForSMS:
+// - Cost calculation fails (no tariff found, etc.)
+// - User not found by userRepo.GetByID
+// - Insufficient credit
+// - userRepo.Update (gRPC to user-service) fails
+// - transactionRepo.Create fails
+// - DB transaction commit fails (mockDbPool.BeginFunc returns error on its own)
 ```

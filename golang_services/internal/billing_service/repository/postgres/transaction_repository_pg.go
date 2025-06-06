@@ -4,99 +4,124 @@ import (
 	"context"
 	"errors"
 	"time"
+	"log/slog" // Added for logger
 
-	"github.com/aradsms/golang_services/internal/billing_service/domain"
-	"github.com/aradsms/golang_services/internal/billing_service/repository"
+	"github.com/AradIT/aradsms/golang_services/internal/billing_service/domain" // Corrected
+	"github.com/AradIT/aradsms/golang_services/internal/billing_service/repository" // Corrected
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn" // For pgErr.Code
-	"github.com/jackc/pgx/v5/pgxpool"
+	// "github.com/jackc/pgx/v5/pgconn" // For pgErr.Code - not used directly here
+	"github.com/jackc/pgx/v5/pgxpool" // Keep for NewPgTransactionRepository, though methods use Querier
 )
 
 var ErrTransactionNotFound = errors.New("transaction not found")
-// No ErrDuplicateTransaction expected as ID is UUID, unless other unique constraints are added.
 
-type pgTransactionRepository struct {
-	db *pgxpool.Pool
+type PgTransactionRepository struct { // Changed to exported type
+	db     *pgxpool.Pool // Retain for creating new transactions if Create doesn't use Querier exclusively, or for New method
+	logger *slog.Logger  // Added logger
 }
 
 // NewPgTransactionRepository creates a new instance of TransactionRepository for PostgreSQL.
-func NewPgTransactionRepository(db *pgxpool.Pool) repository.TransactionRepository {
-	return &pgTransactionRepository{db: db}
+func NewPgTransactionRepository(db *pgxpool.Pool, logger *slog.Logger) repository.TransactionRepository { // Return interface
+	return &PgTransactionRepository{db: db, logger: logger.With("component", "transaction_repository_pg")}
 }
 
-func (r *pgTransactionRepository) Create(ctx context.Context, tx *domain.Transaction) (*domain.Transaction, error) {
-	tx.ID = uuid.NewString()
-	tx.CreatedAt = time.Now().UTC() // Ensure UTC
+// Create now accepts a Querier, which can be a *pgxpool.Pool or pgx.Tx
+func (r *PgTransactionRepository) Create(ctx context.Context, querier repository.Querier, transaction *domain.Transaction) (*domain.Transaction, error) {
+	transaction.ID = uuid.NewString() // Ensure ID is set if not already
+	transaction.CreatedAt = time.Now().UTC()
 
 	query := `
 		INSERT INTO transactions (id, user_id, type, amount, currency_code, description,
-		                          related_message_id, payment_gateway_txn_id, balance_after, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		                          related_message_id, payment_gateway_txn_id, balance_before, balance_after, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
-	_, err := r.db.Exec(ctx, query,
-		tx.ID, tx.UserID, tx.Type, tx.Amount, tx.CurrencyCode, tx.Description,
-		tx.RelatedMessageID, tx.PaymentGatewayTxnID, tx.BalanceAfter, tx.CreatedAt,
+	// Note: Added balance_before to the INSERT statement. The Transaction struct in domain/billing_models.go has it.
+	_, err := querier.Exec(ctx, query,
+		transaction.ID, transaction.UserID, transaction.Type, transaction.Amount, transaction.CurrencyCode, transaction.Description,
+		transaction.RelatedMessageID, transaction.PaymentGatewayTxnID, transaction.BalanceBefore, transaction.BalanceAfter, transaction.CreatedAt,
 	)
 
 	if err != nil {
-		// No typical unique constraint errors expected here other than PK if UUID generation failed, which is unlikely.
-		return nil, err
+		r.logger.ErrorContext(ctx, "Error creating transaction", "error", err, "user_id", transaction.UserID)
+		return nil, fmt.Errorf("creating transaction: %w", err)
 	}
-	return tx, nil
+	r.logger.InfoContext(ctx, "Transaction created successfully", "transaction_id", transaction.ID, "user_id", transaction.UserID)
+	return transaction, nil
 }
 
-func (r *pgTransactionRepository) GetByID(ctx context.Context, id string) (*domain.Transaction, error) {
-	tx := &domain.Transaction{}
+func (r *PgTransactionRepository) GetByID(ctx context.Context, querier repository.Querier, id string) (*domain.Transaction, error) {
+	transaction := &domain.Transaction{}
 	query := `
 		SELECT id, user_id, type, amount, currency_code, description,
-		       related_message_id, payment_gateway_txn_id, balance_after, created_at
+		       related_message_id, payment_gateway_txn_id, balance_before, balance_after, created_at
 		FROM transactions WHERE id = $1
 	`
-	err := r.db.QueryRow(ctx, query, id).Scan(
-		&tx.ID, &tx.UserID, &tx.Type, &tx.Amount, &tx.CurrencyCode, &tx.Description,
-		&tx.RelatedMessageID, &tx.PaymentGatewayTxnID, &tx.BalanceAfter, &tx.CreatedAt,
+	// Note: Added balance_before to SELECT
+	err := querier.QueryRow(ctx, query, id).Scan(
+		&transaction.ID, &transaction.UserID, &transaction.Type, &transaction.Amount, &transaction.CurrencyCode, &transaction.Description,
+		&transaction.RelatedMessageID, &transaction.PaymentGatewayTxnID, &transaction.BalanceBefore, &transaction.BalanceAfter, &transaction.CreatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrTransactionNotFound
+			r.logger.InfoContext(ctx, "Transaction not found by ID", "transaction_id", id)
+			return nil, ErrTransactionNotFound // Return domain-specific error
 		}
-		return nil, err
+		r.logger.ErrorContext(ctx, "Error scanning transaction by ID", "transaction_id", id, "error", err)
+		return nil, fmt.Errorf("scanning transaction by ID %s: %w", id, err)
 	}
-	return tx, nil
+	return transaction, nil
 }
 
-func (r *pgTransactionRepository) GetByUserID(ctx context.Context, userID string, limit, offset int) ([]domain.Transaction, error) {
+func (r *PgTransactionRepository) GetByUserID(ctx context.Context, querier repository.Querier, userID string, limit, offset int) ([]domain.Transaction, int, error) {
+	countQuery := `SELECT COUNT(*) FROM transactions WHERE user_id = $1`
+	var totalCount int
+	if err := querier.QueryRow(ctx, countQuery, userID).Scan(&totalCount); err != nil {
+		r.logger.ErrorContext(ctx, "Error counting transactions by UserID", "user_id", userID, "error", err)
+		return nil, 0, fmt.Errorf("counting transactions for user %s: %w", userID, err)
+	}
+
+	if totalCount == 0 {
+		return []domain.Transaction{}, 0, nil
+	}
+
 	query := `
 		SELECT id, user_id, type, amount, currency_code, description,
-		       related_message_id, payment_gateway_txn_id, balance_after, created_at
+		       related_message_id, payment_gateway_txn_id, balance_before, balance_after, created_at
 		FROM transactions
 		WHERE user_id = $1
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
 	`
-	rows, err := r.db.Query(ctx, query, userID, limit, offset)
+	rows, err := querier.Query(ctx, query, userID, limit, offset)
 	if err != nil {
-		return nil, err
+		r.logger.ErrorContext(ctx, "Error querying transactions by UserID", "user_id", userID, "error", err)
+		return nil, 0, fmt.Errorf("querying transactions for user %s: %w", userID, err)
 	}
 	defer rows.Close()
 
 	var transactions []domain.Transaction
 	for rows.Next() {
-		var tx domain.Transaction
+		var transaction domain.Transaction
+		// Note: Added balance_before to SELECT
 		err := rows.Scan(
-			&tx.ID, &tx.UserID, &tx.Type, &tx.Amount, &tx.CurrencyCode, &tx.Description,
-			&tx.RelatedMessageID, &tx.PaymentGatewayTxnID, &tx.BalanceAfter, &tx.CreatedAt,
+			&transaction.ID, &transaction.UserID, &transaction.Type, &transaction.Amount, &transaction.CurrencyCode, &transaction.Description,
+			&transaction.RelatedMessageID, &transaction.PaymentGatewayTxnID, &transaction.BalanceBefore, &transaction.BalanceAfter, &transaction.CreatedAt,
 		)
 		if err != nil {
-			return nil, err // Or collect errors and continue
+			r.logger.ErrorContext(ctx, "Error scanning transaction row for UserID", "user_id", userID, "error", err)
+			// Depending on strictness, may return partial results or error out.
+			// For now, return what's been collected along with the error from rows.Err() later.
+			// Or, simply return immediately:
+			return nil, 0, fmt.Errorf("scanning transaction for user %s: %w", userID, err)
 		}
-		transactions = append(transactions, tx)
+		transactions = append(transactions, transaction)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, err
+		r.logger.ErrorContext(ctx, "Error after iterating transaction rows for UserID", "user_id", userID, "error", err)
+		return nil, 0, fmt.Errorf("iterating transactions for user %s: %w", userID, err)
 	}
 
-	return transactions, nil
+	return transactions, totalCount, nil
 }
