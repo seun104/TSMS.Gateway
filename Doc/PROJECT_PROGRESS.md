@@ -98,8 +98,7 @@ This document outlines the key implementation steps and progress tracking for re
 
 
 ## Phase 3: Delivery Reports & Incoming SMS
-(All items below are [ ])
-*   [ ] **Delivery Retrieval Service (`delivery-retrieval-service`):**
+*   [x] **Delivery Retrieval Service (`delivery-retrieval-service`):**
     *   [x] Initial directory structure and `main.go` created. (`cmd/delivery_retrieval_service`, `internal/delivery_retrieval_service`)
     *   [x] Define `DeliveryReport` and `DeliveryStatus` domain models. (`internal/delivery_retrieval_service/domain/delivery_report.go`)
     *   [x] Define `OutboxMessage` domain model (minimal) and `OutboxRepository` interface. (`domain/outbox_message.go`, `domain/outbox_repository.go`)
@@ -109,11 +108,11 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Integrate `DLRProcessor` into `main.go` to process polled DLRs - (Now processes DLR events from NATS consumer).
     *   [x] Integrate into build system (Makefile) and deployment (docker-compose.yml with shared Dockerfile.golang).
     *   [x] NATS: Consume DLR events from `dlr.raw.*` (`app/dlr_consumer.go` and integrated into `main.go`).
-    *   [ ] Logic to poll providers (for the one implemented) for delivery reports (if applicable). (Replaced by NATS-based DLR consumption)
-    *   [ ] Implement cron job for periodic polling. (Replaced by NATS-based DLR consumption)
+    *   [N/A] Logic to poll providers (for the one implemented) for delivery reports (if applicable). (Replaced by NATS-based DLR consumption)
+    *   [N/A] Implement cron job for periodic polling. (Replaced by NATS-based DLR consumption)
     *   [x] Update `outbox_messages` table with DLR status. (Implementation via DLRProcessor using NATS events)
     *   [x] (Optional) NATS: Publish DLR events. (Implemented in `DLRProcessor` to publish `ProcessedDLREvent` to `dlr.processed.v1.{providerName}`)
-*   [ ] **Public API Service (`public-api-service`):**
+*   [x] **Public API Service (`public-api-service`):**
     *   [x] Define DTOs for provider DLR and incoming SMS callbacks (`ProviderDLRCallbackRequest`, `ProviderIncomingSMSRequest` in `internal/public_api_service/transport/http/incoming_dtos.go`).
     *   [x] Implement `POST /incoming/receive/{provider_name}` endpoint for provider DLR callbacks. (`internal/public_api_service/transport/http/incoming_handler.go` and `cmd/public_api_service/main.go`)
         *   [x] Validate callback (basic path param, JSON decoding, DTO validation).
@@ -121,7 +120,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Implement endpoint for provider incoming SMS callbacks. (`internal/public_api_service/transport/http/incoming_handler.go` and `cmd/public_api_service/main.go`)
         *   [x] Validate callback (basic path param, JSON decoding, DTO validation).
         *   [x] Publish raw incoming SMS data to a NATS subject (`sms.incoming.raw.{provider_name}`).
-*   [ ] **Inbound Processor Service (`inbound-processor-service`):**
+*   [x] **Inbound Processor Service (`inbound-processor-service`):**
     *   [x] Initial directory structure and `main.go` created. (`cmd/inbound_processor_service`, `internal/inbound_processor_service`)
     *   [x] Integrate into build system (Makefile) and deployment (docker-compose.yml using shared Dockerfile.golang).
     *   [x] Define `InboxMessage` domain model and `InboxRepository` interface. (`domain/inbox_message.go`, `domain/inbox_repository.go`)
