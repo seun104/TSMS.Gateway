@@ -23,3 +23,8 @@ PHONEBOOK_SERVICE_GRPC_PORT: 50051 # Actual internal port phonebook-service list
 PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET: "phonebook-service:50051" # public-api connects to this
 # The host port mapping in phonebook-service's docker-compose (e.g., "50054:50051") is for external access to the service,
 # not for inter-service communication within the Docker network.
+
+# Scheduler Service
+SCHEDULER_POLLING_INTERVAL: "60s" # How often the scheduler polls for due jobs
+SCHEDULER_JOB_BATCH_SIZE: 10      # Max number of jobs to acquire in one poll cycle
+SCHEDULER_MAX_RETRY: 3            # Max number of retries for a failed job

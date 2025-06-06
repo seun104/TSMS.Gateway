@@ -69,6 +69,11 @@ type Config struct {
 	PhonebookServiceGRPCPort         int    `mapstructure:"PHONEBOOK_SERVICE_GRPC_PORT"`
 	PhonebookServiceGRPCClientTarget string `mapstructure:"PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET"`
 
+	// Scheduler Service Specific
+	SchedulerPollingInterval time.Duration `mapstructure:"SCHEDULER_POLLING_INTERVAL"`
+	SchedulerJobBatchSize    int           `mapstructure:"SCHEDULER_JOB_BATCH_SIZE"`
+	SchedulerMaxRetry        int           `mapstructure:"SCHEDULER_MAX_RETRY"`
+
 	// AppSpecific can hold configurations that are not common or don't have direct fields above.
 	// Example: if a service needs a "FOO_API_KEY", it could be APP_FOO_API_KEY -> FooAPIKey in AppSpecific.
 	// This requires viper.Unmarshal(&cfg) and then potentially another unmarshal/lookup for service-specific parts.
@@ -114,6 +119,10 @@ func Load(serviceName string) (*Config, error) { // serviceName can be used to l
 
     v.SetDefault("PHONEBOOK_SERVICE_GRPC_PORT", 50051) // Default internal port for Phonebook service
     v.SetDefault("PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET", "localhost:50051") // Default target for clients
+
+    v.SetDefault("SCHEDULER_POLLING_INTERVAL", "60s") // Default polling interval
+    v.SetDefault("SCHEDULER_JOB_BATCH_SIZE", 10)     // Default number of jobs to fetch per poll
+    v.SetDefault("SCHEDULER_MAX_RETRY", 3)           // Default max retries for a job
 
 
 	if err := v.ReadInConfig(); err != nil {

@@ -16,9 +16,9 @@ import (
 	"github.com/your-repo/project/internal/platform/logger"
 	"github.com/your-repo/project/internal/platform/messagebroker"
 
-	// Scheduler service specific packages (placeholders)
-	// "github.com/your-repo/project/internal/scheduler_service/app"
-	// "github.com/your-repo/project/internal/scheduler_service/repository/postgres"
+	// Scheduler service specific packages
+	"github.com/your-repo/project/internal/scheduler_service/app"
+	"github.com/your-repo/project/internal/scheduler_service/repository/postgres"
 )
 
 const (
@@ -60,16 +60,43 @@ func main() {
 	log.Info("NATS connection initialized")
 
 	// Setup application components
-	// scheduledJobRepo := postgres.NewPgScheduledJobRepository(dbPool, log)
-	// schedulerApp := app.NewSchedulerApplication(scheduledJobRepo, natsClient, log, cfg) // App to manage scheduling logic
+	// Setup application components
+	scheduledJobRepo := postgres.NewPgScheduledJobRepository(dbPool, log)
+
+	pollerCfg := app.PollerConfig{
+		PollingInterval: cfg.SchedulerPollingInterval,
+		JobBatchSize:    cfg.SchedulerJobBatchSize,
+		MaxRetry:        cfg.SchedulerMaxRetry,
+	}
+	jobPoller := app.NewJobPoller(scheduledJobRepo, natsClient, log, pollerCfg)
 
 	g, groupCtx := errgroup.WithContext(mainCtx)
 
 	// Start the main scheduling loop/ticker
-	// g.Go(func() error {
-	//	 log.Info("Starting scheduler loop...")
-	//	 return schedulerApp.RunScheduler(groupCtx)
-	// })
+	g.Go(func() error {
+		log.Info("Starting scheduler job poller worker...", "polling_interval", pollerCfg.PollingInterval)
+		ticker := time.NewTicker(pollerCfg.PollingInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				log.InfoContext(groupCtx, "Job poller tick")
+				processed, err := jobPoller.PollAndProcessJobs(groupCtx)
+				if err != nil {
+					// This is a critical error from the poller itself (e.g. DB connection issue during acquire)
+					log.ErrorContext(groupCtx, "Job poller encountered a critical error, stopping.", "error", err)
+					return err // Stop the goroutine, which will stop the service via errgroup
+				}
+				if processed > 0 {
+					log.InfoContext(groupCtx, "Job poller processed jobs in this tick", "count", processed)
+				}
+			case <-groupCtx.Done():
+				log.InfoContext(groupCtx, "Job poller worker stopping due to group context done.", "error", groupCtx.Err())
+				return groupCtx.Err()
+			}
+		}
+	})
 
 	log.Info("Service components initialized and workers (if any) started. Service is ready.")
 

@@ -149,8 +149,8 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Define `ScheduledJob` model. (`internal/scheduler_service/domain/scheduled_job.go`)
     *   [x] Implement PostgreSQL schema & migrations for `scheduled_jobs`. (`migrations/000007_create_scheduled_jobs_table.up.sql` & `.down.sql`)
     *   [x] Implement `ScheduledJobRepository` interface and PostgreSQL implementation. (`domain/scheduled_job_repository.go`, `repository/postgres/scheduled_job_repository_pg.go`)
-    *   [ ] Implement cron job logic to check `scheduled_jobs` table.
-    *   [ ] NATS: Publish "send SMS" jobs to NATS for due scheduled messages.
+    *   [x] Implement cron job logic to check `scheduled_jobs` table. (`app/job_poller.go` created and integrated into `main.go`)
+    *   [x] NATS: Publish "send SMS" jobs to NATS for due scheduled messages. (Implemented in `JobPoller` for "sms" job type)
 *   [ ] **Public API Service (`public-api-service`):**
     *   [ ] Implement `/scheduled_messages` CRUD endpoints (interacts with `scheduler-service`).
 *   [ ] **SMS Sending Service (`sms-sending-service`):**
