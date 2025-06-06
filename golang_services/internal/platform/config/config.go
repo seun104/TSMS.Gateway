@@ -53,6 +53,9 @@ type Config struct {
 	MagfaProviderAPIKey              string `mapstructure:"MAGFA_PROVIDER_API_KEY"`
 	MagfaProviderSenderID            string `mapstructure:"MAGFA_PROVIDER_SENDER_ID"`
 
+	// Billing Service HTTP Port (for webhooks)
+	BillingServiceHTTPPort         int    `mapstructure:"BILLING_SERVICE_HTTP_PORT"`
+
 
 	// AppSpecific can hold configurations that are not common or don't have direct fields above.
 	// Example: if a service needs a "FOO_API_KEY", it could be APP_FOO_API_KEY -> FooAPIKey in AppSpecific.
@@ -110,6 +113,7 @@ func Load(serviceName string) (*Config, error) { // serviceName can be used to l
 	v.SetDefault("MAGFA_PROVIDER_API_URL", "https_magfa_api_url_here")
 	v.SetDefault("MAGFA_PROVIDER_API_KEY", "your_magfa_api_key_here")
 	v.SetDefault("MAGFA_PROVIDER_SENDER_ID", "your_magfa_sender_id_here")
+	v.SetDefault("BILLING_SERVICE_HTTP_PORT", 8081) // Default HTTP port for billing service webhooks
 
 
 	if err := v.ReadInConfig(); err != nil {

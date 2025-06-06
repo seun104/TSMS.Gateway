@@ -37,3 +37,6 @@ SMS_SENDING_SERVICE_DEFAULT_PROVIDER: "mock" # or "magfa" once implemented
 MAGFA_PROVIDER_API_URL: "https_magfa_api_url_here"
 MAGFA_PROVIDER_API_KEY: "your_magfa_api_key_here"
 MAGFA_PROVIDER_SENDER_ID: "your_magfa_sender_id_here"
+
+# Billing Service Specific
+BILLING_SERVICE_HTTP_PORT: 8081 # Port for webhook HTTP server
