@@ -94,6 +94,19 @@ func (m *MockBlacklistRepository) IsBlacklisted(ctx context.Context, phoneNumber
 	return args.Bool(0), args.String(1), args.Error(2)
 }
 
+type MockFilterWordRepository struct {
+	mock.Mock
+}
+
+func (m *MockFilterWordRepository) GetActiveFilterWords(ctx context.Context) ([]string, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]string), args.Error(1)
+}
+
+
 // MockPgxPool to mock BeginFunc behavior
 type MockPgxPool struct {
     mock.Mock
@@ -146,6 +159,7 @@ type testAppServiceComponents struct {
 	mockProviders  map[string]provider.SMSSenderProvider
 	mockRouter     *MockRouter
 	mockBlacklist  *MockBlacklistRepository
+	mockFilterWord *MockFilterWordRepository // Added
 	mockNats       *messagebroker.NatsClient
 	mockDbPool     *MockPgxPool
 	logger         *slog.Logger
@@ -176,7 +190,8 @@ func setupAppServiceTest(t *testing.T) testAppServiceComponents {
 	}
 	mockRouter := new(MockRouter)
 	mockBlacklistRepo := new(MockBlacklistRepository)
-	mockDbPool := NewMockPgxPool(t) // Pass testing.T to the mock pool
+	mockFilterWordRepo := new(MockFilterWordRepository) // Added
+	mockDbPool := NewMockPgxPool(t)
 
 	service := NewSMSSendingAppService(
 		mockOutboxRepo,
@@ -188,6 +203,7 @@ func setupAppServiceTest(t *testing.T) testAppServiceComponents {
 		logger,
 		mockRouter,
 		mockBlacklistRepo,
+		mockFilterWordRepo, // Added
 	)
 
 	return testAppServiceComponents{
@@ -197,6 +213,7 @@ func setupAppServiceTest(t *testing.T) testAppServiceComponents {
 		mockProviders:  providers,
 		mockRouter:     mockRouter,
 		mockBlacklist:  mockBlacklistRepo,
+		mockFilterWord: mockFilterWordRepo, // Added
 		mockDbPool:     mockDbPool,
 		logger:         logger,
 	}
@@ -314,7 +331,9 @@ func TestSMSSendingAppService_ProcessSMSJob_NotBlacklisted_NormalFlow(t *testing
 
     comps.mockOutboxRepo.On("GetByID", mock.Anything, mock.Anything, jobPayload.OutboxMessageID).Return(mockMessage, nil).Once()
     comps.mockBlacklist.On("IsBlacklisted", mock.Anything, mockMessage.Recipient, uuid.NullUUID{UUID: testUserID, Valid: true}).
-        Return(false, "", nil).Once()
+        Return(false, "", nil).Once() // Not blacklisted
+
+	comps.mockFilterWord.On("GetActiveFilterWords", mock.Anything).Return([]string{}, nil).Once() // No filter words matched
 
     comps.mockOutboxRepo.On("UpdateStatus", mock.Anything, mock.Anything, mockMessage.ID, coreSmsDomain.MessageStatusProcessing, mock.AnythingOfType("*time.Time"), (*string)(nil), (*string)(nil)).Return(nil).Once()
 
@@ -339,11 +358,101 @@ func TestSMSSendingAppService_ProcessSMSJob_NotBlacklisted_NormalFlow(t *testing
 
     comps.mockOutboxRepo.AssertExpectations(t)
 	comps.mockBlacklist.AssertExpectations(t)
+	comps.mockFilterWord.AssertExpectations(t) // Added assertion for filterWord mock
     comps.mockBilling.AssertExpectations(t)
     comps.mockRouter.AssertExpectations(t)
     defaultProviderMock.AssertExpectations(t)
     comps.mockDbPool.AssertExpectations(t)
 }
+
+
+func TestSMSSendingAppService_ProcessSMSJob_ContentFiltered(t *testing.T) {
+	comps := setupAppServiceTest(t)
+	jobPayload := NATSJobPayload{OutboxMessageID: "test-id-filtered"}
+	testUserID := uuid.New()
+	filterWord := "forbidden"
+	mockMessage := &coreSmsDomain.OutboxMessage{
+		ID:        jobPayload.OutboxMessageID,
+		UserID:    testUserID.String(),
+		Recipient: "recipient-filtered",
+		Content:   "This message contains a " + filterWord + " word.",
+		Status:    coreSmsDomain.MessageStatusQueued,
+	}
+
+	comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+		Run(func(args mock.Arguments) {
+			fn := args.Get(1).(func(pgx.Tx) error)
+			assert.NoError(t, fn(nil))
+		}).Return(nil).Once()
+
+	comps.mockOutboxRepo.On("GetByID", mock.Anything, mock.Anything, jobPayload.OutboxMessageID).Return(mockMessage, nil).Once()
+	comps.mockBlacklist.On("IsBlacklisted", mock.Anything, mockMessage.Recipient, uuid.NullUUID{UUID: testUserID, Valid: true}).
+		Return(false, "", nil).Once() // Not blacklisted
+
+	comps.mockFilterWord.On("GetActiveFilterWords", mock.Anything).Return([]string{filterWord, "another"}, nil).Once()
+
+	expectedErrorMessage := "Message content rejected due to filter word: " + filterWord
+	comps.mockOutboxRepo.On("UpdatePostSendInfo", mock.Anything, mock.Anything, mockMessage.ID, coreSmsDomain.MessageStatusRejected,
+		(*string)(nil), (*string)(nil), mock.AnythingOfType("time.Time"), &expectedErrorMessage).
+		Return(nil).Once()
+
+	err := comps.service.processSMSJob(context.Background(), jobPayload)
+	assert.NoError(t, err)
+
+	comps.mockOutboxRepo.AssertExpectations(t)
+	comps.mockBlacklist.AssertExpectations(t)
+	comps.mockFilterWord.AssertExpectations(t)
+	comps.mockBilling.AssertNotCalled(t, "DeductCredit")
+	defaultProviderMock, _ := comps.mockProviders["mock"].(*MockSMSSenderProvider)
+    defaultProviderMock.AssertNotCalled(t, "Send")
+	comps.mockDbPool.AssertExpectations(t)
+}
+
+func TestSMSSendingAppService_ProcessSMSJob_FilterWordRepoError(t *testing.T) {
+	comps := setupAppServiceTest(t)
+	jobPayload := NATSJobPayload{OutboxMessageID: "test-id-filter-repo-err"}
+	testUserID := uuid.New()
+	mockMessage := &coreSmsDomain.OutboxMessage{
+		ID:        jobPayload.OutboxMessageID,
+		UserID:    testUserID.String(),
+		Recipient: "recipient-filter-repo-err",
+		Content:   "Some content",
+		Status:    coreSmsDomain.MessageStatusQueued,
+	}
+	repoError := errors.New("filter repo DB error")
+	expectedOverallErrorMsg := "Filter word check failed: " + repoError.Error()
+
+
+	comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+		Run(func(args mock.Arguments) {
+			fn := args.Get(1).(func(pgx.Tx) error)
+			err := fn(nil)
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), expectedOverallErrorMsg)
+		}).Return(errors.New(expectedOverallErrorMsg)).Once()
+
+
+	comps.mockOutboxRepo.On("GetByID", mock.Anything, mock.Anything, jobPayload.OutboxMessageID).Return(mockMessage, nil).Once()
+	comps.mockBlacklist.On("IsBlacklisted", mock.Anything, mockMessage.Recipient, uuid.NullUUID{UUID: testUserID, Valid: true}).
+		Return(false, "", nil).Once() // Not blacklisted
+
+	comps.mockFilterWord.On("GetActiveFilterWords", mock.Anything).Return(nil, repoError).Once()
+
+	comps.mockOutboxRepo.On("UpdatePostSendInfo", mock.Anything, mock.Anything, mockMessage.ID, coreSmsDomain.MessageStatusFailed,
+        (*string)(nil), (*string)(nil), mock.AnythingOfType("time.Time"), &expectedOverallErrorMsg).
+        Return(nil).Once()
+
+	err := comps.service.processSMSJob(context.Background(), jobPayload)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), expectedOverallErrorMsg)
+
+	comps.mockOutboxRepo.AssertExpectations(t)
+	comps.mockBlacklist.AssertExpectations(t)
+	comps.mockFilterWord.AssertExpectations(t)
+	comps.mockBilling.AssertNotCalled(t, "DeductCredit")
+	comps.mockDbPool.AssertExpectations(t)
+}
+
 
 // TODO: Add tests for:
 // - UserID parsing failure in processSMSJob during blacklist check (how it affects msgUserID and IsBlacklisted call)
@@ -352,4 +461,6 @@ func TestSMSSendingAppService_ProcessSMSJob_NotBlacklisted_NormalFlow(t *testing
 // - Error conditions from provider.Send method
 // - Error conditions from various outboxRepo.Update methods within the transaction
 // - Idempotency: message already processed/not in "queued" state (should return nil, no action)
+// - Content not matching any filter words (should proceed to billing etc.) - This is covered by NotBlacklisted_NormalFlow now
+// - Empty list of active filter words (should proceed to billing etc.) - Also covered by NotBlacklisted_NormalFlow
 ```

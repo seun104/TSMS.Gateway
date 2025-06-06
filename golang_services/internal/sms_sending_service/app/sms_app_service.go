@@ -18,6 +18,7 @@ import (
 	"github.com/nats-io/nats.go"
     "github.com/jackc/pgx/v5/pgxpool" // For DB transactions
     "github.com/jackc/pgx/v5"       // For pgx.Tx
+	"strings"                       // For content filtering
 )
 
 // NATSJobPayload defines the structure of the message expected from NATS.
@@ -41,7 +42,8 @@ type SMSSendingAppService struct {
 	dbPool              *pgxpool.Pool // For starting transactions
 	logger              *slog.Logger
 	router              *Router
-	blacklistRepo       blacklistDomain.BlacklistRepository // Added blacklist repository
+	blacklistRepo       blacklistDomain.BlacklistRepository
+	filterWordRepo      blacklistDomain.FilterWordRepository // Added filter word repository
 	natsSub             *nats.Subscription
 }
 
@@ -55,7 +57,8 @@ func NewSMSSendingAppService(
 	dbPool *pgxpool.Pool,
 	logger *slog.Logger,
 	router *Router,
-	blacklistRepo blacklistDomain.BlacklistRepository, // Added
+	blacklistRepo blacklistDomain.BlacklistRepository,
+	filterWordRepo blacklistDomain.FilterWordRepository, // Added
 ) *SMSSendingAppService {
 	return &SMSSendingAppService{
 		outboxRepo:          outboxRepo,
@@ -66,7 +69,8 @@ func NewSMSSendingAppService(
 		dbPool:              dbPool,
 		logger:              logger.With("service", "sms_sending_app"),
 		router:              router,
-		blacklistRepo:       blacklistRepo, // Added
+		blacklistRepo:       blacklistRepo,
+		filterWordRepo:      filterWordRepo, // Added
 	}
 }
 
@@ -163,20 +167,55 @@ func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPay
 			if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusRejected, nil, nil, now, &errMsg); errUpdate != nil {
                  s.logger.ErrorContext(ctx, "Failed to update outbox for blacklisted message", "error", errUpdate, "id", outboxMsg.ID)
             }
-			return nil // Blacklisted, so job is "handled" by rejection, commit transaction with rejected state.
+			return nil
 		}
 		// ** BLACKLIST CHECK END **
 
-        // Update status to "processing" - moved after blacklist check
+		// ** CONTENT FILTERING START **
+		activeFilterWords, fwErr := s.filterWordRepo.GetActiveFilterWords(ctx)
+		if fwErr != nil {
+			s.logger.ErrorContext(ctx, "Error fetching active filter words", "error", fwErr, "message_id", outboxMsg.ID)
+            errMsg := fmt.Sprintf("Filter word check failed: %v", fwErr)
+            now := time.Now().UTC()
+            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusFailed, nil, nil, now, &errMsg); errUpdate != nil {
+                 s.logger.ErrorContext(ctx, "Failed to update outbox after filter word check error", "error", errUpdate, "id", outboxMsg.ID)
+            }
+            return fmt.Errorf(errMsg) // Fail the transaction
+		}
+
+		if len(activeFilterWords) > 0 {
+			normalizedContent := strings.ToLower(outboxMsg.Content)
+			var matchedFilterWord string
+			for _, filterWord := range activeFilterWords {
+				if strings.Contains(normalizedContent, strings.ToLower(filterWord)) {
+					matchedFilterWord = filterWord
+					break
+				}
+			}
+
+			if matchedFilterWord != "" {
+				s.logger.InfoContext(ctx, "Message content filtered",
+					"recipient", outboxMsg.Recipient,
+					"matched_word", matchedFilterWord,
+					"message_id", outboxMsg.ID)
+
+				errMsg := fmt.Sprintf("Message content rejected due to filter word: %s", matchedFilterWord)
+				now := time.Now().UTC()
+				if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusRejected, nil, nil, now, &errMsg); errUpdate != nil {
+					s.logger.ErrorContext(ctx, "Failed to update outbox for filtered message", "error", errUpdate, "id", outboxMsg.ID)
+				}
+				return nil // Message rejected due to filter, commit transaction with rejected state.
+			}
+		}
+		// ** CONTENT FILTERING END **
+
+        // Update status to "processing" - moved after all checks
         processingTime := time.Now().UTC()
-        // Use UpdateStatus to specifically update status to processing
         if errStatusUpdate := s.outboxRepo.UpdateStatus(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusProcessing, &processingTime, nil, nil); errStatusUpdate != nil {
              s.logger.ErrorContext(ctx, "Failed to update outbox status to processing", "error", errStatusUpdate, "id", outboxMsg.ID)
              return fmt.Errorf("db update (processing) failed: %w", errStatusUpdate)
         }
-        // Re-fetch or update outboxMsg struct after status update if necessary, or ensure UpdateStatus returns the updated fields.
-        // For now, assume outboxMsg fields are consistent enough or updated in-memory for subsequent steps.
-        outboxMsg.Status = coreSmsDomain.MessageStatusProcessing // Keep struct in sync
+        outboxMsg.Status = coreSmsDomain.MessageStatusProcessing
         outboxMsg.ProcessedAt = &processingTime
 
 

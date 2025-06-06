@@ -165,10 +165,10 @@ This document outlines the key implementation steps and progress tracking for re
 *   [ ] **Export Service (`export-service`):**
     *   [ ] Basic data export logic for one entity (e.g., outbox messages to CSV).
     *   [ ] NATS: Consume export requests.
-*   [ ] **Blacklist & Filters:**
+*   [x] **Blacklist & Filters:**
     *   [x] Implement PostgreSQL schema & migrations for `blacklisted_numbers`, `filter_words`.
     *   [x] Integrate blacklist check into `sms-sending-service`.
-    *   [ ] Integrate content filtering (using `filter_words`) into `sms-sending-service`.
+    *   [x] Integrate content filtering (using `filter_words`) into `sms-sending-service`.
 
 ## Phase 5: Observability, Testing & Deployment Prep
 (All items below are [ ])

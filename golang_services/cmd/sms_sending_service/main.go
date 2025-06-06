@@ -103,6 +103,10 @@ func main() {
 	blacklistRepo := postgres.NewPgBlacklistRepository(dbPool, appLogger.With("component", "blacklist_repository"))
 	appLogger.Info("BlacklistRepository initialized.")
 
+	// Initialize FilterWordRepository
+	filterWordRepo := postgres.NewPgFilterWordRepository(dbPool, appLogger.With("component", "filter_word_repository"))
+	appLogger.Info("FilterWordRepository initialized.")
+
 	// Initialize SMSSendingAppService
 	smsAppService := app.NewSMSSendingAppService(
 		outboxRepo,
@@ -113,7 +117,8 @@ func main() {
 		dbPool,
 		appLogger,
 		router,
-		blacklistRepo, // Pass the blacklist repository instance
+		blacklistRepo,
+		filterWordRepo, // Pass the filter word repository instance
 	)
 	appLogger.Info("SMSSendingAppService initialized.")
 
