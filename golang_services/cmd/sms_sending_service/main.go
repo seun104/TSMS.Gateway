@@ -99,6 +99,10 @@ func main() {
 	router := app.NewRouter(routeRepo, providers, appLogger.With("component", "router"))
 	appLogger.Info("Router initialized.")
 
+	// Initialize BlacklistRepository
+	blacklistRepo := postgres.NewPgBlacklistRepository(dbPool, appLogger.With("component", "blacklist_repository"))
+	appLogger.Info("BlacklistRepository initialized.")
+
 	// Initialize SMSSendingAppService
 	smsAppService := app.NewSMSSendingAppService(
 		outboxRepo,
@@ -108,7 +112,8 @@ func main() {
 		natsClient,
 		dbPool,
 		appLogger,
-		router, // Pass the router instance
+		router,
+		blacklistRepo, // Pass the blacklist repository instance
 	)
 	appLogger.Info("SMSSendingAppService initialized.")
 

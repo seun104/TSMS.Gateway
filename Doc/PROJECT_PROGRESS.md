@@ -167,7 +167,7 @@ This document outlines the key implementation steps and progress tracking for re
     *   [ ] NATS: Consume export requests.
 *   [ ] **Blacklist & Filters:**
     *   [x] Implement PostgreSQL schema & migrations for `blacklisted_numbers`, `filter_words`.
-    *   [ ] Integrate blacklist check into `sms-sending-service`.
+    *   [x] Integrate blacklist check into `sms-sending-service`.
     *   [ ] Integrate content filtering (using `filter_words`) into `sms-sending-service`.
 
 ## Phase 5: Observability, Testing & Deployment Prep

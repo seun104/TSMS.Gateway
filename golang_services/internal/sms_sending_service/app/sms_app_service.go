@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/aradsms/golang_services/api/proto/billingservice" // gRPC client for billing
-	"github.com/aradsms/golang_services/internal/core_sms/domain"
+	coreSmsDomain "github.com/aradsms/golang_services/internal/core_sms/domain" // Alias for clarity
 	"github.com/aradsms/golang_services/internal/platform/messagebroker" // NATS
+	blacklistDomain "github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/domain" // New blacklist domain
 	"github.com/aradsms/golang_services/internal/sms_sending_service/provider"
-	"github.com/aradsms/golang_services/internal/sms_sending_service/repository"
-	// "github.com/google/uuid" // Not directly used here, but OutboxMessage.ID might be UUID string
+	"github.com/aradsms/golang_services/internal/sms_sending_service/repository" // For OutboxRepository
+	"github.com/google/uuid" // For parsing UserID string to UUID
 	"github.com/nats-io/nats.go"
     "github.com/jackc/pgx/v5/pgxpool" // For DB transactions
     "github.com/jackc/pgx/v5"       // For pgx.Tx
@@ -39,8 +40,9 @@ type SMSSendingAppService struct {
 	natsClient          *messagebroker.NatsClient
 	dbPool              *pgxpool.Pool // For starting transactions
 	logger              *slog.Logger
-	router              *Router            // Added router
-	natsSub             *nats.Subscription // To manage the NATS subscription
+	router              *Router
+	blacklistRepo       blacklistDomain.BlacklistRepository // Added blacklist repository
+	natsSub             *nats.Subscription
 }
 
 // NewSMSSendingAppService creates a new SMSSendingAppService.
@@ -52,7 +54,8 @@ func NewSMSSendingAppService(
 	natsClient *messagebroker.NatsClient,
 	dbPool *pgxpool.Pool,
 	logger *slog.Logger,
-	router *Router, // Added router
+	router *Router,
+	blacklistRepo blacklistDomain.BlacklistRepository, // Added
 ) *SMSSendingAppService {
 	return &SMSSendingAppService{
 		outboxRepo:          outboxRepo,
@@ -62,7 +65,8 @@ func NewSMSSendingAppService(
 		natsClient:          natsClient,
 		dbPool:              dbPool,
 		logger:              logger.With("service", "sms_sending_app"),
-		router:              router, // Added router
+		router:              router,
+		blacklistRepo:       blacklistRepo, // Added
 	}
 }
 
@@ -104,37 +108,79 @@ func (s *SMSSendingAppService) StartConsumingJobs(ctx context.Context, subject, 
 func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPayload) error {
 	s.logger.InfoContext(ctx, "Processing SMS job", "outbox_message_id", job.OutboxMessageID)
 
-    var outboxMsg *domain.OutboxMessage
+    var outboxMsg *coreSmsDomain.OutboxMessage // Use alias for core SMS domain
     var err error
 
     // Start a database transaction
     txErr := pgx.BeginFunc(ctx, s.dbPool, func(tx pgx.Tx) error {
-        // 1. Fetch the OutboxMessage (assuming it was created by public-api-service)
-        // If not, then create it here based on full payload from NATS.
-        // For this flow, we assume it's pre-created and ID is passed.
         outboxMsg, err = s.outboxRepo.GetByID(ctx, tx, job.OutboxMessageID)
         if err != nil {
             s.logger.ErrorContext(ctx, "Failed to get outbox message", "error", err, "id", job.OutboxMessageID)
-            return fmt.Errorf("outbox message not found: %w", err) // Stop processing if not found
+            return fmt.Errorf("outbox message not found: %w", err)
         }
 
-        // Check if already processed beyond "queued" (idempotency)
-        if outboxMsg.Status != domain.MessageStatusQueued {
+        if outboxMsg.Status != coreSmsDomain.MessageStatusQueued {
             s.logger.WarnContext(ctx, "SMS job already processed or in invalid state", "id", job.OutboxMessageID, "status", outboxMsg.Status)
-            return nil // Acknowledge NATS message, do not reprocess
+            return nil
         }
 
-        // Update status to "processing"
-        processingTime := time.Now()
-        outboxMsg.Status = domain.MessageStatusProcessing
-        outboxMsg.ProcessedAt = &processingTime
-        if errStatusUpdate := s.outboxRepo.UpdateStatus(ctx, tx, outboxMsg.ID, outboxMsg.Status, nil, nil, nil); errStatusUpdate != nil {
+		// ** BLACKLIST CHECK START **
+		var msgUserID uuid.NullUUID
+		if outboxMsg.UserID != "" {
+			parsedUUID, parseErr := uuid.Parse(outboxMsg.UserID)
+			if parseErr == nil {
+				msgUserID = uuid.NullUUID{UUID: parsedUUID, Valid: true}
+			} else {
+				s.logger.WarnContext(ctx, "Failed to parse UserID from outbox message for blacklist check", "user_id_str", outboxMsg.UserID, "message_id", outboxMsg.ID, "error", parseErr)
+			}
+		}
+
+		isBlacklisted, blReason, blErr := s.blacklistRepo.IsBlacklisted(ctx, outboxMsg.Recipient, msgUserID)
+		if blErr != nil {
+			s.logger.ErrorContext(ctx, "Error checking blacklist", "error", blErr, "recipient", outboxMsg.Recipient, "message_id", outboxMsg.ID)
+			// Decide if this is a hard fail or soft fail. For now, log and continue (provider will likely fail if number is truly invalid).
+            // For a production system, this might be a reason to fail the transaction.
+            // Let's change to fail the job if blacklist check itself errors out.
+            errMsg := fmt.Sprintf("Blacklist check failed: %v", blErr)
+            now := time.Now().UTC()
+            // Assuming UpdatePostSendInfo can handle general failures before sending.
+            // A more specific status like MessageStatusSystemError might be better.
+            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusFailed, nil, nil, now, &errMsg); errUpdate != nil {
+                 s.logger.ErrorContext(ctx, "Failed to update outbox after blacklist check error", "error", errUpdate, "id", outboxMsg.ID)
+            }
+            return fmt.Errorf(errMsg) // Fail the transaction and job processing
+		}
+
+		if isBlacklisted {
+			s.logger.InfoContext(ctx, "Recipient is blacklisted", "recipient", outboxMsg.Recipient, "reason", blReason, "message_id", outboxMsg.ID)
+			errMsg := "Recipient blacklisted"
+			if blReason != "" {
+				errMsg = fmt.Sprintf("Recipient blacklisted: %s", blReason)
+			}
+			now := time.Now().UTC()
+            // Using UpdatePostSendInfo to set a final status.
+            // ProviderMessageID and ProviderStatus would be nil/empty.
+			if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusRejected, nil, nil, now, &errMsg); errUpdate != nil {
+                 s.logger.ErrorContext(ctx, "Failed to update outbox for blacklisted message", "error", errUpdate, "id", outboxMsg.ID)
+            }
+			return nil // Blacklisted, so job is "handled" by rejection, commit transaction with rejected state.
+		}
+		// ** BLACKLIST CHECK END **
+
+        // Update status to "processing" - moved after blacklist check
+        processingTime := time.Now().UTC()
+        // Use UpdateStatus to specifically update status to processing
+        if errStatusUpdate := s.outboxRepo.UpdateStatus(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusProcessing, &processingTime, nil, nil); errStatusUpdate != nil {
              s.logger.ErrorContext(ctx, "Failed to update outbox status to processing", "error", errStatusUpdate, "id", outboxMsg.ID)
              return fmt.Errorf("db update (processing) failed: %w", errStatusUpdate)
         }
+        // Re-fetch or update outboxMsg struct after status update if necessary, or ensure UpdateStatus returns the updated fields.
+        // For now, assume outboxMsg fields are consistent enough or updated in-memory for subsequent steps.
+        outboxMsg.Status = coreSmsDomain.MessageStatusProcessing // Keep struct in sync
+        outboxMsg.ProcessedAt = &processingTime
 
-        // 2. Check & Deduct Credit via Billing Service
-        // TODO: Calculate actual cost/segments for amountToDeduct
+
+        // 2. Check & Deduct Credit via Billing Service (No changes here from original logic)
         amountToDeduct := 1.0 // Placeholder: 1 unit of credit per SMS
         deductReq := &billingservice.DeductCreditRequest{
             UserId:           outboxMsg.UserID,
@@ -151,16 +197,15 @@ func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPay
         if errBilling != nil {
             s.logger.ErrorContext(ctx, "Failed to deduct credit via billing service", "error", errBilling, "userID", outboxMsg.UserID)
             errMsg := fmt.Sprintf("Billing error: %v", errBilling)
-            sentTime := time.Now() // Time of failure
-            // Use existing tx for this update
-            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedProviderSubmission, nil, nil, sentTime, &errMsg); errUpdate != nil {
+            now := time.Now().UTC()
+            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusFailedProviderSubmission, nil, nil, now, &errMsg); errUpdate != nil {
                  s.logger.ErrorContext(ctx, "Failed to update outbox after billing failure", "error", errUpdate, "id", outboxMsg.ID)
             }
             return fmt.Errorf("credit deduction failed: %w", errBilling)
         }
         s.logger.InfoContext(ctx, "Credit deducted successfully", "userID", outboxMsg.UserID)
 
-        // 3. Send SMS via Provider
+        // 3. Send SMS via Provider (logic for selecting provider using router is already here from previous step)
         sendDetails := provider.SendRequestDetails{
             InternalMessageID: outboxMsg.ID,
             SenderID:          outboxMsg.SenderID,
@@ -188,49 +233,43 @@ func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPay
             s.logger.InfoContext(ctx, "No specific route matched, using default provider", "default_provider", s.defaultProviderName, "outbox_message_id", outboxMsg.ID)
             var ok bool
             selectedProvider, ok = s.providers[s.defaultProviderName]
-            if !ok || selectedProvider == nil { // Check selectedProvider for nil explicitly
+            if !ok || selectedProvider == nil {
                 s.logger.ErrorContext(ctx, "Default SMS provider not found or not configured", "provider_name", s.defaultProviderName, "outbox_message_id", outboxMsg.ID)
                 errMsg := fmt.Sprintf("Default SMS provider '%s' not found/configured", s.defaultProviderName)
-                sentAt := time.Now()
-                if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedConfiguration, nil, nil, sentAt, &errMsg); errUpdate != nil {
+                now := time.Now().UTC()
+                if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusFailedConfiguration, nil, nil, now, &errMsg); errUpdate != nil {
                     s.logger.ErrorContext(ctx, "Failed to update outbox after default provider configuration error", "error", errUpdate, "id", outboxMsg.ID)
                 }
-                return fmt.Errorf(errMsg) // Stop processing this job
+                return fmt.Errorf(errMsg)
             }
         }
 
         s.logger.InfoContext(ctx, "Sending SMS via provider", "provider", selectedProvider.GetName(), "recipient", outboxMsg.Recipient, "outbox_message_id", outboxMsg.ID)
 
-        providerCtx, providerCancel := context.WithTimeout(ctx, 30*time.Second) // Timeout for provider call
+        providerCtx, providerCancel := context.WithTimeout(ctx, 30*time.Second)
         defer providerCancel()
         providerResponse, sendErr := selectedProvider.Send(providerCtx, sendDetails)
-        sentAt := time.Now()
+        now := time.Now().UTC()
 
-        // 4. Update OutboxMessage based on provider response
         if sendErr != nil {
             s.logger.ErrorContext(ctx, "Failed to send SMS via provider", "error", sendErr, "provider", selectedProvider.GetName(), "outbox_message_id", outboxMsg.ID)
             errMsg := sendErr.Error()
             providerStatusStr := ""
-            if providerResponse != nil { // Provider might return a response even on error
+            if providerResponse != nil {
                 providerStatusStr = providerResponse.ProviderStatus
             }
-            // Use existing tx for this update
-            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedProviderSubmission, nil, &providerStatusStr, sentAt, &errMsg); errUpdate != nil {
+            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusFailedProviderSubmission, nil, &providerStatusStr, now, &errMsg); errUpdate != nil {
                 s.logger.ErrorContext(ctx, "Failed to update outbox after provider send failure", "error", errUpdate, "id", outboxMsg.ID)
             }
-            // Return sendErr to ensure the transaction is rolled back if this is considered a true failure for the job.
-            // Or, if the update was successful, and this is just a provider failure to be logged, return nil for tx.
-            // For now, let's assume provider failure means the job processing failed overall.
             return fmt.Errorf("provider send error for %s: %w", selectedProvider.GetName(), sendErr)
         }
 
         s.logger.InfoContext(ctx, "SMS submitted to provider successfully", "provider", selectedProvider.GetName(), "provider_msg_id", providerResponse.ProviderMessageID, "outbox_message_id", outboxMsg.ID)
-        // Use existing tx for this update
-        if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusSentToProvider, &providerResponse.ProviderMessageID, &providerResponse.ProviderStatus, sentAt, nil); errUpdate != nil {
+        if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusSentToProvider, &providerResponse.ProviderMessageID, &providerResponse.ProviderStatus, now, nil); errUpdate != nil {
             s.logger.ErrorContext(ctx, "Failed to update outbox after successful provider submission", "error", errUpdate, "id", outboxMsg.ID)
             return fmt.Errorf("db update (post send info) failed: %w", errUpdate)
         }
-        return nil // Transaction successful
+        return nil
     })
 
     return txErr
