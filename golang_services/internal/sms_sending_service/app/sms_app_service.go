@@ -39,27 +39,30 @@ type SMSSendingAppService struct {
 	natsClient          *messagebroker.NatsClient
 	dbPool              *pgxpool.Pool // For starting transactions
 	logger              *slog.Logger
+	router              *Router            // Added router
 	natsSub             *nats.Subscription // To manage the NATS subscription
 }
 
 // NewSMSSendingAppService creates a new SMSSendingAppService.
 func NewSMSSendingAppService(
 	outboxRepo repository.OutboxRepository,
-	providers map[string]provider.SMSSenderProvider, // Updated
-	defaultProviderName string, // Added
+	providers map[string]provider.SMSSenderProvider,
+	defaultProviderName string,
 	billingClient billingservice.BillingInternalServiceClient,
 	natsClient *messagebroker.NatsClient,
 	dbPool *pgxpool.Pool,
 	logger *slog.Logger,
+	router *Router, // Added router
 ) *SMSSendingAppService {
 	return &SMSSendingAppService{
 		outboxRepo:          outboxRepo,
-		providers:           providers, // Updated
-		defaultProviderName: defaultProviderName, // Added
+		providers:           providers,
+		defaultProviderName: defaultProviderName,
 		billingClient:       billingClient,
 		natsClient:          natsClient,
 		dbPool:              dbPool,
 		logger:              logger.With("service", "sms_sending_app"),
+		router:              router, // Added router
 	}
 }
 
@@ -166,17 +169,36 @@ func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPay
             UserData:          outboxMsg.UserData,
         }
 
-		// Select provider (using default for now, routing logic can be added later)
-		selectedProvider, ok := s.providers[s.defaultProviderName]
-		if !ok || selectedProvider == nil {
-			s.logger.ErrorContext(ctx, "Default SMS provider not found or not configured", "provider_name", s.defaultProviderName, "outbox_message_id", outboxMsg.ID)
-			errMsg := fmt.Sprintf("SMS provider '%s' not found/configured", s.defaultProviderName)
-			sentAt := time.Now()
-			if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedConfiguration, nil, nil, sentAt, &errMsg); errUpdate != nil {
-				s.logger.ErrorContext(ctx, "Failed to update outbox after provider configuration error", "error", errUpdate, "id", outboxMsg.ID)
-			}
-			return fmt.Errorf(errMsg) // Stop processing this job
-		}
+        // Select provider using the router
+        userIDStr := outboxMsg.UserID // Assuming UserID is a string on OutboxMessage (it is in core_sms/domain)
+
+        selectedProvider, routeErr := s.router.SelectProvider(ctx, outboxMsg.Recipient, userIDStr)
+        if routeErr != nil {
+            s.logger.ErrorContext(ctx, "Error selecting provider from router", "error", routeErr, "outbox_message_id", outboxMsg.ID)
+            errMsg := fmt.Sprintf("Routing error: %v", routeErr)
+            sentAt := time.Now()
+            // Consider a specific status for routing failure if different from general config error
+            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedConfiguration, nil, nil, sentAt, &errMsg); errUpdate != nil {
+                s.logger.ErrorContext(ctx, "Failed to update outbox after routing error", "error", errUpdate, "id", outboxMsg.ID)
+            }
+            return fmt.Errorf(errMsg) // Stop processing this job due to routing error
+        }
+
+        if selectedProvider == nil { // No specific route matched, fallback to default provider
+            s.logger.InfoContext(ctx, "No specific route matched, using default provider", "default_provider", s.defaultProviderName, "outbox_message_id", outboxMsg.ID)
+            var ok bool
+            selectedProvider, ok = s.providers[s.defaultProviderName]
+            if !ok || selectedProvider == nil { // Check selectedProvider for nil explicitly
+                s.logger.ErrorContext(ctx, "Default SMS provider not found or not configured", "provider_name", s.defaultProviderName, "outbox_message_id", outboxMsg.ID)
+                errMsg := fmt.Sprintf("Default SMS provider '%s' not found/configured", s.defaultProviderName)
+                sentAt := time.Now()
+                if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedConfiguration, nil, nil, sentAt, &errMsg); errUpdate != nil {
+                    s.logger.ErrorContext(ctx, "Failed to update outbox after default provider configuration error", "error", errUpdate, "id", outboxMsg.ID)
+                }
+                return fmt.Errorf(errMsg) // Stop processing this job
+            }
+        }
+
         s.logger.InfoContext(ctx, "Sending SMS via provider", "provider", selectedProvider.GetName(), "recipient", outboxMsg.Recipient, "outbox_message_id", outboxMsg.ID)
 
         providerCtx, providerCancel := context.WithTimeout(ctx, 30*time.Second) // Timeout for provider call
