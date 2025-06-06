@@ -152,14 +152,15 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Implement gRPC interface for CRUD operations on scheduled messages.
 *   [x] **Public API Service (`public-api-service`):**
     *   [x] Implement `/scheduled_messages` CRUD endpoints (interacts with `scheduler-service`).
-*   [ ] **SMS Sending Service (`sms-sending-service`):**
-    *   [ ] Implement adapters for remaining SMS providers.
+*   [x] **SMS Sending Service (`sms-sending-service`):**
+    *   [x] Implement adapters for remaining SMS providers.
         *   [x] Implement adapter for Magfa provider.
     *   [x] Enhance routing logic.
 *   [x] **Inbound Processor Service (`inbound-processor-service`):**
     *   [x] Implement advanced message parsing rules (keywords, polls, etc.).
 *   [ ] **Billing Service (`billing-service` - Full):**
     *   [ ] Implement payment gateway integration (for one gateway).
+        *   [x] Implement core logic, domain, repository, and mock adapter for payment gateway.
     *   [ ] Implement tariff/pricing logic.
     *   [ ] Implement `transactions` table updates for all relevant events.
 *   [ ] **Export Service (`export-service`):**
