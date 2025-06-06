@@ -14,14 +14,14 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	// Corrected paths for platform packages
-	"github.com/your-repo/project/internal/platform/config"
-	"github.com/your-repo/project/internal/platform/database"
-	"github.com/your-repo/project/internal/platform/logger"
-	"github.com/your-repo/project/internal/platform/messagebroker"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/database"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/logger"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker"
 
-	"github.com/your-repo/project/internal/inbound_processor_service/app" // Import app package
-	"github.com/your-repo/project/internal/inbound_processor_service/domain"
-	"github.com/your-repo/project/internal/inbound_processor_service/repository/postgres" // Import repository
+	"github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/app" // Import app package
+	_ "github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/domain" // Domain types used via app typically
+	"github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/repository/postgres" // Import repository
 )
 
 const (
@@ -80,7 +80,12 @@ func main() {
 	// Create a channel for passing messages from consumer to processor logic. Buffer size can be tuned.
 	inboundEventsChan := make(chan app.InboundSMSEvent, 100)
 	smsConsumer := app.NewSMSConsumer(nc, log, inboundEventsChan)
-	smsProcessor := app.NewSMSProcessor(inboxRepo, privateNumRepo, log) // Pass privateNumRepo
+	smsProcessor := app.NewSMSProcessor(
+		inboxRepo,
+		privateNumRepo,
+		nc, // Pass the NATS client
+		log.With("component", "sms_processor"),
+	)
 	// inboundApp := app.NewInboundApplication(smsProcessor, ...) // Higher-level app service if needed
 
 	// Start background workers, NATS consumers, etc.

@@ -156,8 +156,8 @@ This document outlines the key implementation steps and progress tracking for re
     *   [ ] Implement adapters for remaining SMS providers.
         *   [x] Implement adapter for Magfa provider.
     *   [x] Enhance routing logic.
-*   [ ] **Inbound Processor Service (`inbound-processor-service`):**
-    *   [ ] Implement advanced message parsing rules (keywords, polls, etc.).
+*   [x] **Inbound Processor Service (`inbound-processor-service`):**
+    *   [x] Implement advanced message parsing rules (keywords, polls, etc.).
 *   [ ] **Billing Service (`billing-service` - Full):**
     *   [ ] Implement payment gateway integration (for one gateway).
     *   [ ] Implement tariff/pricing logic.
