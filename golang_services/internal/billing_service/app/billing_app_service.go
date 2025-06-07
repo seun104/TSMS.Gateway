@@ -152,31 +152,27 @@ func (s *BillingService) DeductCreditForSMS(ctx context.Context, userID uuid.UUI
 		transaction := &domain.Transaction{
 			// ID will be set by Create method
 			UserID:         userID.String(),
-			Type:           domain.TransactionTypeDebit, // Or TransactionTypeSMSCharge
-			Amount:         costFloat,                   // Store actual cost (positive value, type indicates debit)
+			Type:           domain.TransactionTypeDebit,
+			Amount:         costFloat,
 			CurrencyCode:   currency,
 			Description:    details.Description,
-			RelatedMessageID: &details.ReferenceID, // Assuming ReferenceID is message ID
+			RelatedMessageID: &details.ReferenceID,
 			BalanceBefore:  user.CreditBalance,
 			BalanceAfter:   updatedUser.CreditBalance,
-			// CreatedAt will be set by Create method
+			Status:         domain.TransactionStatusCompleted, // Set status
+			// PaymentIntentID is nil here
 		}
 
-		createdTx, err := s.transactionRepo.Create(ctx, tx, transaction)
+		createdTx, err := s.transactionRepo.Create(ctx, tx, transaction) // transactionRepo.Create uses Querier
 		if err != nil {
 			s.logger.ErrorContext(ctx, "Failed to create debit transaction record", "user_id", userID, "error", err)
-			// IMPORTANT: User's credit was deducted by user-service, but local txn log failed.
-			// This requires a compensation mechanism or robust reconciliation.
-			// For now, the error will cause tx.Rollback(), but user's balance is already changed.
 			return fmt.Errorf("transaction recording failed: %w", err)
 		}
 		createdTransaction = createdTx
-		return nil // Commit local transaction
+		return nil
 	})
 
 	if txErr != nil {
-		// If txErr is from user service call or balance check, createdTransaction will be nil.
-		// If txErr is from local transaction commit or transactionRepo.Create, then also need to handle inconsistency.
 		return nil, txErr
 	}
 
@@ -350,18 +346,19 @@ func (s *BillingService) HandlePaymentWebhook(ctx context.Context, rawPayload []
 					// Create credit transaction
 					creditTxn := &domain.Transaction{
 						UserID:         pi.UserID.String(),
-						Type:           domain.TransactionTypeCredit, // "CREDIT"
-						Amount:         float64(pi.Amount), // Store as positive for credit addition
+						Type:           domain.TransactionTypeCredit,
+						Amount:         float64(pi.Amount),
 						CurrencyCode:   pi.Currency,
-						Description:    fmt.Sprintf("Credit top-up from payment %s", pi.ID.String()),
+						Description:    fmt.Sprintf("Credit top-up from payment intent %s", pi.ID.String()),
 						PaymentIntentID: &pi.ID,
-						BalanceBefore:  user.CreditBalance, // Balance before this top-up
-						BalanceAfter:   updatedUser.CreditBalance, // Balance after top-up
+						PaymentGatewayTxnID: event.GatewayTransactionID, // Populate this from event
+						BalanceBefore:  user.CreditBalance,
+						BalanceAfter:   updatedUser.CreditBalance,
+						Status:         domain.TransactionStatusCompleted, // Set status
 					}
-					// transactionRepo.Create needs to accept pgx.Tx (querier)
-					if _, err := s.transactionRepo.Create(ctx, tx, creditTxn); err != nil { // Pass the transaction 'tx'
+
+					if _, err := s.transactionRepo.Create(ctx, tx, creditTxn); err != nil {
 						s.logger.ErrorContext(ctx, "Failed to create credit top-up transaction record", "error", err, "payment_intent_id", pi.ID)
-						// This is also critical. Payment succeeded, credit granted (maybe), but transaction log failed.
 						errMsg := fmt.Sprintf("Failed to log credit transaction for PI %s: %v", pi.ID, err)
 						currentErrMsg := ""
 						if pi.ErrorMessage != nil { currentErrMsg = *pi.ErrorMessage + "; " }

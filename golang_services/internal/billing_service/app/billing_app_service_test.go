@@ -297,10 +297,12 @@ func TestBillingService_HandlePaymentWebhook_Success(t *testing.T) {
 	// Expect transaction creation
 	comps.mockTxnRepo.On("Create", mock.Anything, mock.Anything, mock.MatchedBy(func(txn *domain.Transaction) bool {
 		return txn.UserID == userID.String() &&
-		       txn.Type == domain.TransactionTypeCredit &&
-		       txn.Amount == float64(amount) && // Amount should be positive for credit
-			   txn.PaymentIntentID != nil && *txn.PaymentIntentID == paymentIntentFromDB.ID
-	})).Return(&domain.Transaction{ID: uuid.New()}, nil).Once()
+			txn.Type == domain.TransactionTypeCredit &&
+			txn.Amount == float64(amount) && // Amount should be positive for credit
+			txn.PaymentIntentID != nil && *txn.PaymentIntentID == paymentIntentFromDB.ID &&
+			txn.Status == domain.TransactionStatusCompleted && // Verify Status
+			((eventFromAdapter.GatewayTransactionID == nil && txn.PaymentGatewayTxnID == nil) || (txn.PaymentGatewayTxnID != nil && eventFromAdapter.GatewayTransactionID != nil && *txn.PaymentGatewayTxnID == *eventFromAdapter.GatewayTransactionID)) // Verify GatewayTransactionID
+	})).Return(&domain.Transaction{ID: uuid.NewString()}, nil).Once() // Ensure returned Tx has an ID for logging if service uses it
 
 	comps.mockPIntentRepo.On("Update", mock.Anything, mock.MatchedBy(func(pi *domain.PaymentIntent) bool {
 		return pi.ID == paymentIntentFromDB.ID && pi.Status == domain.PaymentIntentStatusSucceeded
@@ -456,6 +458,7 @@ func TestBillingService_DeductCreditForSMS_Success(t *testing.T) {
                txn.CurrencyCode == userTariff.Currency &&
                txn.BalanceBefore == mockUser.CreditBalance &&
                txn.BalanceAfter == (mockUser.CreditBalance - expectedCostFloat) &&
+			   txn.Status == domain.TransactionStatusCompleted && // Verify Status
                txn.RelatedMessageID != nil && *txn.RelatedMessageID == messageRefID
     })).Return(&domain.Transaction{ID: uuid.NewString()}, nil).Once()
 

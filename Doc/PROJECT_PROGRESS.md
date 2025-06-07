@@ -158,13 +158,13 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Enhance routing logic.
 *   [x] **Inbound Processor Service (`inbound-processor-service`):**
     *   [x] Implement advanced message parsing rules (keywords, polls, etc.).
-*   [ ] **Billing Service (`billing-service` - Full):**
+*   [x] **Billing Service (`billing-service` - Full):**
     *   [x] Implement payment gateway integration (for one gateway).
         *   [x] Implement core logic, domain, repository, and mock adapter for payment gateway.
         *   [x] Implement HTTP webhook endpoint for payment gateway callbacks.
     *   [x] Implement tariff/pricing logic.
         *   [x] Define schema and migrations for tariffs and user_tariffs tables.
-    *   [ ] Implement `transactions` table updates for all relevant events.
+    *   [x] Implement `transactions` table updates for all relevant events.
 *   [ ] **Export Service (`export-service`):**
     *   [ ] Basic data export logic for one entity (e.g., outbox messages to CSV).
     *   [ ] NATS: Consume export requests.

@@ -33,13 +33,13 @@ func (r *PgTransactionRepository) Create(ctx context.Context, querier repository
 
 	query := `
 		INSERT INTO transactions (id, user_id, type, amount, currency_code, description,
-		                          related_message_id, payment_gateway_txn_id, balance_before, balance_after, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		                          related_message_id, payment_gateway_txn_id, balance_before, balance_after, status, created_at, payment_intent_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 	`
-	// Note: Added balance_before to the INSERT statement. The Transaction struct in domain/billing_models.go has it.
+	// Note: Added balance_before, status, payment_intent_id to the INSERT statement.
 	_, err := querier.Exec(ctx, query,
 		transaction.ID, transaction.UserID, transaction.Type, transaction.Amount, transaction.CurrencyCode, transaction.Description,
-		transaction.RelatedMessageID, transaction.PaymentGatewayTxnID, transaction.BalanceBefore, transaction.BalanceAfter, transaction.CreatedAt,
+		transaction.RelatedMessageID, transaction.PaymentGatewayTxnID, transaction.BalanceBefore, transaction.BalanceAfter, transaction.Status, transaction.CreatedAt, transaction.PaymentIntentID,
 	)
 
 	if err != nil {
@@ -54,18 +54,18 @@ func (r *PgTransactionRepository) GetByID(ctx context.Context, querier repositor
 	transaction := &domain.Transaction{}
 	query := `
 		SELECT id, user_id, type, amount, currency_code, description,
-		       related_message_id, payment_gateway_txn_id, balance_before, balance_after, created_at
+		       related_message_id, payment_gateway_txn_id, balance_before, balance_after, status, created_at, payment_intent_id
 		FROM transactions WHERE id = $1
 	`
-	// Note: Added balance_before to SELECT
+	// Note: Added balance_before, status, payment_intent_id to SELECT
 	err := querier.QueryRow(ctx, query, id).Scan(
 		&transaction.ID, &transaction.UserID, &transaction.Type, &transaction.Amount, &transaction.CurrencyCode, &transaction.Description,
-		&transaction.RelatedMessageID, &transaction.PaymentGatewayTxnID, &transaction.BalanceBefore, &transaction.BalanceAfter, &transaction.CreatedAt,
+		&transaction.RelatedMessageID, &transaction.PaymentGatewayTxnID, &transaction.BalanceBefore, &transaction.BalanceAfter, &transaction.Status, &transaction.CreatedAt, &transaction.PaymentIntentID,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			r.logger.InfoContext(ctx, "Transaction not found by ID", "transaction_id", id)
-			return nil, ErrTransactionNotFound // Return domain-specific error
+			return nil, ErrTransactionNotFound
 		}
 		r.logger.ErrorContext(ctx, "Error scanning transaction by ID", "transaction_id", id, "error", err)
 		return nil, fmt.Errorf("scanning transaction by ID %s: %w", id, err)
@@ -87,7 +87,7 @@ func (r *PgTransactionRepository) GetByUserID(ctx context.Context, querier repos
 
 	query := `
 		SELECT id, user_id, type, amount, currency_code, description,
-		       related_message_id, payment_gateway_txn_id, balance_before, balance_after, created_at
+		       related_message_id, payment_gateway_txn_id, balance_before, balance_after, status, created_at, payment_intent_id
 		FROM transactions
 		WHERE user_id = $1
 		ORDER BY created_at DESC
@@ -103,16 +103,13 @@ func (r *PgTransactionRepository) GetByUserID(ctx context.Context, querier repos
 	var transactions []domain.Transaction
 	for rows.Next() {
 		var transaction domain.Transaction
-		// Note: Added balance_before to SELECT
+		// Note: Added balance_before, status, payment_intent_id to SELECT
 		err := rows.Scan(
 			&transaction.ID, &transaction.UserID, &transaction.Type, &transaction.Amount, &transaction.CurrencyCode, &transaction.Description,
-			&transaction.RelatedMessageID, &transaction.PaymentGatewayTxnID, &transaction.BalanceBefore, &transaction.BalanceAfter, &transaction.CreatedAt,
+			&transaction.RelatedMessageID, &transaction.PaymentGatewayTxnID, &transaction.BalanceBefore, &transaction.BalanceAfter, &transaction.Status, &transaction.CreatedAt, &transaction.PaymentIntentID,
 		)
 		if err != nil {
 			r.logger.ErrorContext(ctx, "Error scanning transaction row for UserID", "user_id", userID, "error", err)
-			// Depending on strictness, may return partial results or error out.
-			// For now, return what's been collected along with the error from rows.Err() later.
-			// Or, simply return immediately:
 			return nil, 0, fmt.Errorf("scanning transaction for user %s: %w", userID, err)
 		}
 		transactions = append(transactions, transaction)

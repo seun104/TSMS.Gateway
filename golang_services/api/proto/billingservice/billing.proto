@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package billingservice;
 
-option go_package = "github.com/aradsms/golang_services/api/proto/billingservice"; // Adjust
+option go_package = "github.com/AradIT/aradsms/golang_services/api/proto/billingservice"; // Corrected
 
 import "google/protobuf/timestamp.proto";
 
@@ -13,6 +13,8 @@ enum TransactionTypeProto {
     TRANSACTION_TYPE_PROTO_REFUND = 3;
     TRANSACTION_TYPE_PROTO_SERVICE_ACTIVATION_FEE = 4;
     TRANSACTION_TYPE_PROTO_MANUAL_ADJUSTMENT = 5;
+    TRANSACTION_TYPE_PROTO_CREDIT = 6; // Added from previous subtask
+    TRANSACTION_TYPE_PROTO_DEBIT = 7;  // Added from previous subtask
 }
 
 message TransactionProto {
@@ -30,19 +32,23 @@ message TransactionProto {
 
 message CheckAndDeductCreditRequest {
     string user_id = 1;
-    double amount_to_deduct = 2; // Should be positive
-    TransactionTypeProto transaction_type = 3;
-    string description = 4;
-    string related_message_id = 5; // Optional
+    // double amount_to_deduct = 2; // Old field
+    int32 segments_to_charge = 2;    // New field: number of message segments or units to charge for
+    string description = 3;          // Kept, can be augmented by server
+    string reference_id = 4;         // Kept, e.g., outbox_message_id
+    // TransactionTypeProto transaction_type = 3; // Removed, server will set type to DEBIT/SMS_CHARGE
 }
 
 message CheckAndDeductCreditResponse {
-    TransactionProto transaction = 1;
-    // bool success = 1;
-    // string transaction_id =2;
-    // string error_message =3; // if not successful
+    bool success = 1;
+    string error_message = 2;         // If success is false
+    string transaction_id = 3;        // ID of the recorded transaction (if successful)
+    int64 amount_deducted = 4;        // Actual amount deducted, in smallest currency unit
+    string currency = 5;              // Currency of the amount_deducted
+    TransactionProto transaction = 6; // Optional: return the full created transaction proto
 }
 
 service BillingServiceInternal {
     rpc CheckAndDeductCredit(CheckAndDeductCreditRequest) returns (CheckAndDeductCreditResponse);
+    // Add other RPCs like GetBalance, ListTransactions, CreatePaymentIntent (for client top-up) later
 }

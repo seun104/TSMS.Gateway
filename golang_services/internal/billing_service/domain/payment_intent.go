@@ -67,6 +67,7 @@ type CreateIntentResponse struct {
 // PaymentGatewayEvent represents a normalized event received from a payment gateway webhook.
 type PaymentGatewayEvent struct {
 	GatewayPaymentIntentID string                 // The gateway's ID for the payment intent.
+	GatewayTransactionID   *string                // Optional: The gateway's specific transaction/charge ID related to this event (e.g., Stripe's ch_ or py_ id)
 	Type                   string                 // Gateway-specific event type (e.g., "payment_intent.succeeded").
 	AmountReceived         int64                  // Amount received, for reconciliation.
 	Currency               string                 // Currency of the amount received.

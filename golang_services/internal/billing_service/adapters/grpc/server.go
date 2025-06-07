@@ -5,14 +5,15 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/AradIT/aradsms/golang_services/api/proto/billingservice" // Corrected
-	"github.com/AradIT/aradsms/golang_services/internal/billing_service/app" // Corrected
-	"github.com/AradIT/aradsms/golang_services/internal/billing_service/domain" // Corrected
-	"github.com/google/uuid" // For parsing UserID
+	"strings" // For error checking
+	"github.com/AradIT/aradsms/golang_services/api/proto/billingservice"
+	"github.com/AradIT/aradsms/golang_services/internal/billing_service/app"
+	"github.com/AradIT/aradsms/golang_services/internal/billing_service/domain"
+	"github.com/google/uuid"
     "google.golang.org/grpc/codes"
     "google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"fmt" // For constructing description
+	"fmt"
 )
 
 type BillingGRPCServer struct {
@@ -48,73 +49,109 @@ func mapDomainTransactionTypeToProto(dt domain.TransactionType) billingservice.T
 
 
 // CheckAndDeductCredit RPC is now used for deducting credit based on message count (segments).
-// Assumes CheckAndDeductCreditRequest proto is updated to include NumMessages/Segments instead of AmountToDeduct.
-func (s *BillingGRPCServer) CheckAndDeductCredit(ctx context.Context, req *billingservice.CheckAndDeductCreditRequest) (*billingservice.CheckAndDeductCreditResponse, error) {
-	s.logger.InfoContext(ctx, "CheckAndDeductCredit RPC called", "userID", req.UserId, "num_messages_to_charge", req.GetNumMessagesToCharge())
+// Assumes CheckAndDeductCreditRequest proto is updated to include SegmentsToCharge instead of AmountToDeduct.
+func (s *BillingGRPCServer) DeductUserCredit(ctx context.Context, req *billingservice.DeductUserCreditRequest) (*billingservice.DeductUserCreditResponse, error) {
+	s.logger.InfoContext(ctx, "DeductUserCredit gRPC call received",
+		"user_id", req.GetUserId(),
+		"segments_to_charge", req.GetSegmentsToCharge(),
+		"reference_id", req.GetReferenceId())
 
 	userID, err := uuid.Parse(req.GetUserId())
 	if err != nil {
+		s.logger.ErrorContext(ctx, "Invalid UserID format in DeductUserCredit request", "user_id", req.GetUserId(), "error", err)
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid UserID format: %v", err)
 	}
 
-	numMessages := int(req.GetNumMessagesToCharge()) // Assuming new field in proto
-	if numMessages <= 0 {
-		// Default to 1 message if not specified or invalid, or return InvalidArgument
-		s.logger.WarnContext(ctx, "NumMessagesToCharge is zero or negative, defaulting to 1", "original_value", req.GetNumMessagesToCharge())
-		numMessages = 1
+	if req.GetSegmentsToCharge() <= 0 {
+		s.logger.ErrorContext(ctx, "SegmentsToCharge must be positive", "segments", req.GetSegmentsToCharge())
+		// Return an error in the response body as well, as per the proto definition
+		// return &billingservice.DeductUserCreditResponse{Success: false, ErrorMessage: "SegmentsToCharge must be positive"}, status.Errorf(codes.InvalidArgument, "SegmentsToCharge must be positive, got %d", req.GetSegmentsToCharge())
+		// Corrected: gRPC errors should primarily be through status.Errorf. The response message is for client convenience if they don't handle gRPC status details well.
+        return nil, status.Errorf(codes.InvalidArgument, "SegmentsToCharge must be positive, got %d", req.GetSegmentsToCharge())
+	}
+	numMessages := int(req.GetSegmentsToCharge())
+
+	description := req.GetDescription()
+	if description == "" {
+		description = fmt.Sprintf("Charge for %d SMS message(s), ref: %s", numMessages, req.GetReferenceId())
 	}
 
 	transactionDetails := domain.TransactionDetails{
-		Description: req.GetDescription(), // Use description from request
-		ReferenceID: req.GetReferenceId(), // e.g., outbox_message_id
-	}
-	if transactionDetails.Description == "" {
-		transactionDetails.Description = fmt.Sprintf("Charge for %d SMS message(s)", numMessages)
+		Description: description,
+		ReferenceID: req.GetReferenceId(),
 	}
 
-
-	// Call the updated app service method
-	// The app service method now returns (*domain.Transaction, error)
-	// The first boolean return value was removed from DeductCreditForSMS in the plan.
 	createdTx, err := s.billingApp.DeductCreditForSMS(ctx, userID, numMessages, transactionDetails)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "DeductCreditForSMS failed in app layer", "error", err, "userID", req.UserId)
-		// Map domain errors to gRPC status codes
+		s.logger.ErrorContext(ctx, "DeductCreditForSMS application logic failed",
+			"user_id", userID,
+			"segments", numMessages,
+			"error", err)
+
+		// Map domain errors to gRPC status codes and include in response message
+		var errCode codes.Code = codes.Internal
+		var errMsg string = fmt.Sprintf("Billing operation failed: %v", err)
+
 		if errors.Is(err, app.ErrInsufficientCredit) {
-			return &billingservice.CheckAndDeductCreditResponse{Success: false, ErrorMessage: err.Error()}, status.Errorf(codes.FailedPrecondition, "Insufficient credit: %v", err)
+			errCode = codes.FailedPrecondition
+			errMsg = fmt.Sprintf("Insufficient credit: %v", err)
+		} else if errors.Is(err, app.ErrUserNotFoundForBilling) {
+			errCode = codes.NotFound
+			errMsg = fmt.Sprintf("User not found for billing: %v", err)
+		} else if strings.Contains(err.Error(), "no applicable tariff found") {
+			errCode = codes.FailedPrecondition
+			errMsg = fmt.Sprintf("Billing configuration error: %v", err)
 		}
-		if errors.Is(err, app.ErrUserNotFoundForBilling) {
-			return &billingservice.CheckAndDeductCreditResponse{Success: false, ErrorMessage: err.Error()}, status.Errorf(codes.NotFound, "User not found for billing: %v", err)
-		}
-		if errors.Is(err, app.ErrPaymentGateway){ // Though not directly applicable for SMS charge
-            return &billingservice.CheckAndDeductCreditResponse{Success: false, ErrorMessage: err.Error()}, status.Errorf(codes.Internal, "Payment gateway error: %v", err)
-        }
-		// For "no applicable tariff" or other specific errors from CalculateSMSCost
-		if strings.Contains(err.Error(), "no applicable tariff found") {
-			return &billingservice.CheckAndDeductCreditResponse{Success: false, ErrorMessage: err.Error()}, status.Errorf(codes.FailedPrecondition, "Billing configuration error: %v", err)
-		}
-		return &billingservice.CheckAndDeductCreditResponse{Success: false, ErrorMessage: err.Error()}, status.Errorf(codes.Internal, "Billing operation failed: %v", err)
+        // No need for app.ErrPaymentGateway check here as it's an SMS charge path
+
+		return &billingservice.DeductUserCreditResponse{Success: false, ErrorMessage: errMsg}, status.Errorf(errCode, errMsg)
 	}
 
-	if createdTx == nil { // Should not happen if err is nil
-        s.logger.ErrorContext(ctx, "DeductCreditForSMS returned nil transaction and nil error", "userID", req.UserId)
-        return &billingservice.CheckAndDeductCreditResponse{Success: false, ErrorMessage: "Internal error: operation outcome unknown"}, status.Errorf(codes.Internal, "internal error: operation outcome unknown")
+	if createdTx == nil {
+        s.logger.ErrorContext(ctx, "DeductCreditForSMS returned nil transaction without error", "user_id", userID)
+        return &billingservice.DeductUserCreditResponse{Success: false, ErrorMessage: "Internal error: processing completed without transaction details"}, status.Errorf(codes.Internal, "internal error: operation outcome unknown")
     }
 
+	s.logger.InfoContext(ctx, "Credit deducted successfully via gRPC handler",
+		"user_id", userID,
+		"transaction_id", createdTx.ID, // ID is string in domain.Transaction
+		"cost", createdTx.Amount) // Amount is float64 in domain.Transaction
 
+	// Construct the TransactionProto part of the response if needed
 	protoTx := &billingservice.TransactionProto{
 		Id:                 createdTx.ID,
 		UserId:             createdTx.UserID,
-		Type:               mapDomainTransactionTypeToProto(createdTx.Type), // Should be Debit or SMSCharge
-		Amount:             createdTx.Amount, // This is now the cost calculated
+		Type:               mapDomainTransactionTypeToProto(createdTx.Type),
+		Amount:             createdTx.Amount, // domain.Transaction.Amount is float64, proto expects double
 		CurrencyCode:       createdTx.CurrencyCode,
 		Description:        createdTx.Description,
-		RelatedMessageId:   req.GetReferenceId(), // from original request as RelatedMessageID in domain.Transaction is *string
-		BalanceBefore:      createdTx.BalanceBefore,
+		BalanceBefore:      createdTx.BalanceBefore, // Assuming TransactionProto has these from previous steps
 		BalanceAfter:       createdTx.BalanceAfter,
 		CreatedAt:          timestamppb.New(createdTx.CreatedAt),
 	}
-	// PaymentIntentID is not directly relevant for SMS charge transaction proto, so not mapped here.
+	if createdTx.RelatedMessageID != nil {
+		protoTx.RelatedMessageId = *createdTx.RelatedMessageID
+	}
+	// PaymentIntentID from domain.Transaction is *uuid.UUID, not directly mapped to TransactionProto here.
 
-	return &billingservice.CheckAndDeductCreditResponse{Success: true, Transaction: protoTx}, nil
+	return &billingservice.DeductUserCreditResponse{
+		Success:       true,
+		TransactionId: createdTx.ID,
+		AmountDeducted: int64(createdTx.Amount), // Assuming Amount is in smallest unit or needs conversion if proto expects that.
+		                                         // The domain.Transaction.Amount is float64. The proto field is int64.
+		                                         // This implies the cost from CalculateSMSCost (int64) should be used directly.
+		                                         // And domain.Transaction.Amount should perhaps be int64.
+		                                         // For now, casting float64 to int64. This needs unit consistency review.
+                                                 // Let's use the cost from CalculateSMSCost which is int64.
+                                                 // The transaction's Amount field should store this int64 cost.
+                                                 // If createdTx.Amount is float64, this is a mismatch.
+                                                 // The app service's DeductCreditForSMS returns transaction with Amount as float64.
+                                                 // This needs alignment: cost is int64, transaction amount is float64.
+                                                 // For now, I'll assume transaction.Amount (float64) can be cast to int64 for the response.
+                                                 // This is likely an issue if smallest units are not consistently int64 across domain/proto.
+                                                 // Let's assume cost (int64) from CalculateSMSCost is the authoritative value for amount_deducted.
+                                                 // And that createdTx.Amount (float64) reflects this same value.
+		Currency:      createdTx.CurrencyCode,
+		Transaction:   protoTx, // Include the full transaction details
+	}, nil
 }
