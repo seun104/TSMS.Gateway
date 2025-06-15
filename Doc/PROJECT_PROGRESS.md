@@ -165,9 +165,9 @@ This document outlines the key implementation steps and progress tracking for re
     *   [x] Implement tariff/pricing logic.
         *   [x] Define schema and migrations for tariffs and user_tariffs tables.
     *   [x] Implement `transactions` table updates for all relevant events.
-*   [ ] **Export Service (`export-service`):**
-    *   [ ] Basic data export logic for one entity (e.g., outbox messages to CSV).
-    *   [ ] NATS: Consume export requests.
+*   [x] **Export Service (`export-service`):**
+    *   [x] Basic data export logic for one entity (e.g., outbox messages to CSV).
+    *   [x] NATS: Consume export requests.
 *   [x] **Blacklist & Filters:**
     *   [x] Implement PostgreSQL schema & migrations for `blacklisted_numbers`, `filter_words`.
     *   [x] Integrate blacklist check into `sms-sending-service`.

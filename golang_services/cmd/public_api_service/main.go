@@ -128,8 +128,9 @@ func main() {
 	// Initialize validator
 	validate := validator.New()
     incomingHandler := incomingHttp.NewIncomingHandler(natsClient, appLogger, validate)
-    phonebookHandler := httptransport.NewPhonebookHandler(phonebookClient, appLogger, validate) // Pass validator
+    phonebookHandler := httptransport.NewPhonebookHandler(phonebookClient, appLogger, validate)
 	schedulerHandler := httptransport.NewSchedulerHandler(schedulerServiceClient.GetClient(), appLogger, validate)
+	exportHandler := httptransport.NewExportHandler(natsClient, appLogger, validate) // Initialize ExportHandler
 
 
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -162,6 +163,14 @@ func main() {
             // Register Scheduler routes under /api/v1/scheduled_messages
             r.Route("/scheduled_messages", func(sr chi.Router) {
                 schedulerHandler.RegisterRoutes(sr)
+            })
+
+            // Register Export routes under /api/v1/exports
+            // Example: POST /api/v1/exports/outbox-messages
+            r.Route("/exports", func(er chi.Router) {
+                // Specific endpoint for outbox messages export
+                er.Post("/outbox-messages", exportHandler.RequestExportOutboxMessages)
+                // Add other exportable entities here if needed later
             })
         })
     })
