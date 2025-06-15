@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"github.com/nats-io/nats.go"
-	"github.com/your-repo/project/internal/delivery_retrieval_service/domain"
-	"github.com/your-repo/project/internal/platform/messagebroker"
+	"github.com/AradIT/aradsms/golang_services/internal/delivery_retrieval_service/domain" // Corrected
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker" // Corrected
 )
 
 // DLREvent bundles the provider name and the DLR data from the NATS message.
@@ -38,56 +38,77 @@ func NewDLRConsumer(natsClient *messagebroker.NATSClient, logger *slog.Logger, o
 // This method is blocking and designed to be run in a goroutine.
 // It respects context cancellation for graceful shutdown.
 func (c *DLRConsumer) StartConsuming(ctx context.Context, subject string, queueGroup string) error {
-	msgHandler := func(msg *nats.Msg) {
-		c.logger.InfoContext(ctx, "Received NATS DLR message", "subject", msg.Subject, "data_len", len(msg.Data))
+	msgHandler := func(msg *nats.Msg) { // nats.Msg does not carry a context directly, use the consumer's ctx
+		// Create a logger for this specific message, including NATS subject
+		msgLogger := c.logger.With("nats_subject", msg.Subject)
+		msgLogger.InfoContext(ctx, "Received NATS DLR message", "data_len", len(msg.Data))
 
 		subjectParts := strings.Split(msg.Subject, ".")
 		if len(subjectParts) < 3 || subjectParts[0] != "dlr" || subjectParts[1] != "raw" {
-			c.logger.ErrorContext(ctx, "Invalid NATS subject format for DLR", "subject", msg.Subject)
+			msgLogger.ErrorContext(ctx, "Invalid NATS subject format for DLR")
 			return
 		}
 		providerName := subjectParts[2]
 		if providerName == "" || providerName == "*" || providerName == ">" {
-			c.logger.ErrorContext(ctx, "Could not determine provider name from DLR subject or it's a wildcard", "subject", msg.Subject)
+			msgLogger.ErrorContext(ctx, "Could not determine provider name from DLR subject or it's a wildcard")
 			return
 		}
+
+		// Add provider_name to logger context for subsequent logs for this message
+		msgLogger = msgLogger.With("provider_name", providerName)
 
 		var dlrData domain.ProviderDLRCallbackRequest
 		if err := json.Unmarshal(msg.Data, &dlrData); err != nil {
-			c.logger.ErrorContext(ctx, "Failed to deserialize NATS DLR message data",
-				"error", err, "subject", msg.Subject, "data", string(msg.Data))
-			// Consider sending to a dead-letter queue.
+			msgLogger.ErrorContext(ctx, "Failed to deserialize NATS DLR message data",
+				"error", err, "data", string(msg.Data))
 			return
 		}
 
-		c.logger.InfoContext(ctx, "Successfully deserialized DLR data",
-			"provider_name", providerName,
-			"message_id", dlrData.MessageID,
-			"status", dlrData.Status,
+		// Add more specific DLR identifiers to logger
+		msgLogger = msgLogger.With(
+			"provider_message_id", dlrData.ProviderMessageID,
+			"internal_message_id", dlrData.MessageID, // Assuming this is our internal ID if available
 		)
+
+		msgLogger.InfoContext(ctx, "Successfully deserialized DLR data", "status", dlrData.Status)
 
 		event := DLREvent{
 			ProviderName: providerName,
 			RequestData:  dlrData,
 		}
 
+		// Use a context for the select, possibly derived from the main consumer context
+		// to allow timeout for sending to channel if it's blocked.
+		sendCtx, cancelSend := context.WithTimeout(ctx, 5*time.Second) // Example timeout
+		defer cancelSend()
+
 		select {
 		case c.outputChan <- event:
-			c.logger.DebugContext(ctx, "Sent deserialized DLR event to processing channel", "provider_name", providerName, "message_id", dlrData.MessageID)
-		case <-ctx.Done():
-			c.logger.InfoContext(ctx, "Context cancelled, not sending DLR event to processing channel",
-				"provider_name", providerName, "message_id", dlrData.MessageID, "error", ctx.Err())
+			msgLogger.DebugContext(sendCtx, "Sent deserialized DLR event to processing channel")
+		case <-sendCtx.Done(): // If timeout occurs sending to channel
+			msgLogger.ErrorContext(sendCtx, "Timed out sending DLR event to processing channel", "error", sendCtx.Err())
+			return
+		case <-ctx.Done(): // If main consumer context is cancelled
+			msgLogger.InfoContext(ctx, "Context cancelled, not sending DLR event to processing channel", "error", ctx.Err())
 			return
 		}
 	}
 
 	c.logger.InfoContext(ctx, "Starting NATS DLR subscription", "subject", subject, "queue_group", queueGroup)
+	// Assuming SubscribeToSubjectWithQueue is part of NATSClient interface and handles context for shutdown
 	err := c.natsClient.SubscribeToSubjectWithQueue(ctx, subject, queueGroup, msgHandler)
 	if err != nil {
 		c.logger.ErrorContext(ctx, "NATS DLR subscription failed", "error", err, "subject", subject)
 		return err
 	}
 
-	c.logger.InfoContext(ctx, "NATS DLR subscription ended.", "subject", subject)
+	// This log might be reached if SubscribeToSubjectWithQueue is non-blocking and returns nil on successful setup,
+    // or after it returns due to context cancellation if it's blocking.
+	// If blocking, it will log "NATS DLR subscription ended" when ctx is cancelled.
+	<-ctx.Done() // Wait for context cancellation to signal shutdown
+	c.logger.InfoContext(ctx, "NATS DLR subscription processing loop ended due to context cancellation.", "subject", subject)
 	return nil
 }
+
+// Added time import for context.WithTimeout
+import "time"

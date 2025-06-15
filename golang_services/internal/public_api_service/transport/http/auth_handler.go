@@ -42,32 +42,30 @@ func (h *AuthHandler) RegisterRoutes(r chi.Router) { // Assuming chi.Router is p
 
 
 func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx) // Chi's middleware for request ID
+	logger := h.logger.With("request_id", requestID)
+
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
         if errors.Is(err, io.EOF) {
+			logger.WarnContext(ctx, "Empty request body for registration")
             h.jsonError(w, "Request body is empty", http.StatusBadRequest)
             return
         }
+		logger.ErrorContext(ctx, "Failed to decode registration request", "error", err)
 		h.jsonError(w, "Invalid request payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
     // TODO: Add request validation using 'validate' tag on RegisterRequest struct
     // if err := h.validate.Struct(req); err != nil {
+	//     logger.WarnContext(ctx, "Registration validation failed", "error", err, "request", req)
     //     h.jsonError(w, "Validation failed: "+err.Error(), http.StatusBadRequest)
     //     return
     // }
 
-
-	// This gRPC call needs to be implemented in user_service's gRPC server
-    // For now, let's assume it takes these parameters and returns a user ID or error.
-    // The user_service.AuthServiceInternalClient needs a RegisterUser method.
-    // Let's assume we add a Register RPC to auth.proto and implement it in user_service.
-    // For now, we'll simulate this and focus on the API handler structure.
-    // This part will require changes once the gRPC service in user_service is updated.
-
-    h.logger.InfoContext(r.Context(), "Registration attempt", "username", req.Username, "email", req.Email)
+    logger.InfoContext(ctx, "Registration attempt received", "username", req.Username, "email", req.Email)
     // Placeholder: Simulate call to a hypothetical RegisterUser RPC
-    // In reality, you'd call something like:
     // _, err := h.userServiceClient.RegisterUser(r.Context(), &userservice.RegisterUserRequest{...})
     // For now, we can't call a RegisterUser RPC as it's not in auth.proto yet.
     // This handler is therefore incomplete until that gRPC endpoint exists.
@@ -127,24 +125,25 @@ func (h *AuthHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
     // This will require proto and user_service gRPC handler updates.
 
     // Placeholder for calling a Login RPC on UserServiceClient
-    // loginResp, err := h.userServiceClient.Login(r.Context(), &userservice.LoginRequest{Username: req.Username, Password: req.Password})
-    // For demonstration, let's construct a dummy success:
-    // This logic should call user_service via gRPC.
-    // We will simulate the call for now.
-    accessToken, refreshToken, userID, username, err := h.userServiceClient.SimulateLogin(r.Context(), req.Username, req.Password)
+    // loginResp, err := h.userServiceClient.Login(ctx, &userservice.LoginRequest{Username: req.Username, Password: req.Password})
+    accessToken, refreshToken, userID, username, err := h.userServiceClient.SimulateLogin(ctx, req.Username, req.Password)
     if err != nil {
+		logger.WarnContext(ctx, "Login simulation failed", "username", req.Username, "error", err)
         if strings.Contains(err.Error(), "invalid credentials") || strings.Contains(err.Error(), "not found") {
-             h.jsonError(w, "Invalid username or password", http.StatusUnauthorized)
+             h.jsonError(w, logger, "Invalid username or password", http.StatusUnauthorized)
         } else if strings.Contains(err.Error(), "not active") {
-            h.jsonError(w, "User account is not active", http.StatusForbidden)
+            h.jsonError(w, logger, "User account is not active", http.StatusForbidden)
         } else if strings.Contains(err.Error(), "locked") {
-            h.jsonError(w, "Account is temporarily locked", http.StatusForbidden)
+            h.jsonError(w, logger, "Account is temporarily locked", http.StatusForbidden)
         } else {
-            h.jsonError(w, "Login failed: "+err.Error(), http.StatusInternalServerError)
+            h.jsonError(w, logger, "Login failed: "+err.Error(), http.StatusInternalServerError)
         }
         return
     }
 
+	// Add UserID to logger context for subsequent logs if login is successful
+	logger = logger.With("auth_user_id", userID)
+	logger.InfoContext(ctx, "User login successful", "username", username)
 
 	response := LoginResponse{
 		AccessToken:  accessToken,
@@ -157,31 +156,36 @@ func (h *AuthHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) handleRefreshToken(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
 	var req RefreshTokenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonError(w, "Invalid request payload", http.StatusBadRequest)
+		logger.ErrorContext(ctx, "Failed to decode refresh token request", "error", err)
+		h.jsonError(w, logger, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
     // TODO: Add request validation
 
-    // This will call user_service RefreshToken (which needs to be exposed via gRPC)
+    logger.InfoContext(ctx, "Refresh token attempt received")
     // Placeholder for calling a RefreshToken RPC on UserServiceClient
-    // refreshResp, err := h.userServiceClient.RefreshToken(r.Context(), &userservice.RefreshTokenRequest{RefreshToken: req.RefreshToken})
-    // For demonstration:
-    newAccessToken, newRefreshToken, err := h.userServiceClient.SimulateRefreshToken(r.Context(), req.RefreshToken)
+    // refreshResp, err := h.userServiceClient.RefreshToken(ctx, &userservice.RefreshTokenRequest{RefreshToken: req.RefreshToken})
+    newAccessToken, newRefreshToken, err := h.userServiceClient.SimulateRefreshToken(ctx, req.RefreshToken)
     if err != nil {
+		logger.WarnContext(ctx, "Token refresh simulation failed", "error", err)
         if strings.Contains(err.Error(), "invalid or expired") {
-             h.jsonError(w, "Invalid or expired refresh token", http.StatusUnauthorized)
+             h.jsonError(w, logger, "Invalid or expired refresh token", http.StatusUnauthorized)
         } else {
-            h.jsonError(w, "Token refresh failed: "+err.Error(), http.StatusInternalServerError)
+            h.jsonError(w, logger, "Token refresh failed: "+err.Error(), http.StatusInternalServerError)
         }
         return
     }
 
-	response := LoginResponse{ // Reuses LoginResponse for refreshed tokens
+	logger.InfoContext(ctx, "Token refresh successful")
+	response := LoginResponse{
 		AccessToken:  newAccessToken,
 		RefreshToken: newRefreshToken,
-        // UserID and Username might not be needed/returned on refresh, depends on design
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
@@ -189,7 +193,9 @@ func (h *AuthHandler) handleRefreshToken(w http.ResponseWriter, r *http.Request)
 
 
 // jsonError is a helper to write JSON error responses.
-func (h *AuthHandler) jsonError(w http.ResponseWriter, message string, statusCode int) {
+// It now accepts a logger to ensure the request_id is logged with the error.
+func (h *AuthHandler) jsonError(w http.ResponseWriter, logger *slog.Logger, message string, statusCode int) {
+	logger.WarnContext(context.Background(), "API Error Response", "status_code", statusCode, "message", message) // Use context from request if available
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(statusCode)
     json.NewEncoder(w).Encode(GenericErrorResponse{Error: message})
@@ -200,37 +206,26 @@ func (h *AuthHandler) jsonError(w http.ResponseWriter, message string, statusCod
 // They help define the contract the UI handler expects.
 /*
 func (c *UserServiceClient) SimulateRegister(ctx context.Context, username, email, password, fname, lname, phone string) (string, error) {
-    c.logger.InfoContext(ctx, "[SIMULATED] RegisterUser called in client", "username", username)
-    // In a real scenario, this would make a gRPC call.
-    // Simulate some basic validation or error conditions based on input
-    if username == "exists" {
-        return "", errors.New("username already exists")
-    }
-    if email == "exists@example.com" {
-        return "", errors.New("email already exists")
-    }
-    return "simulated-user-id-" + username, nil
+    reqID, _ := ctx.Value(middleware.RequestIDKey).(string) // Example: How client might get reqID if propagated
+    clientLogger := c.logger.With("request_id", reqID)
+    clientLogger.InfoContext(ctx, "[SIMULATED] RegisterUser called in client", "username", username)
+    // ...
 }
 
 func (c *UserServiceClient) SimulateLogin(ctx context.Context, username, password string) (string, string, string, string, error) {
-    c.logger.InfoContext(ctx, "[SIMULATED] LoginUser called in client", "username", username)
-    if username == "testuser" && password == "password" {
-        return "simulated-access-token", "simulated-refresh-token", "user-id-123", username, nil
-    }
-    if username == "inactive" && password == "password" {
-        return "", "", "", "", errors.New("user account is not active")
-    }
-    if username == "locked" && password == "password" {
-        return "", "", "", "", errors.New("account is temporarily locked")
-    }
-    return "", "", "", "", errors.New("invalid credentials")
+    reqID, _ := ctx.Value(middleware.RequestIDKey).(string)
+    clientLogger := c.logger.With("request_id", reqID)
+    clientLogger.InfoContext(ctx, "[SIMULATED] LoginUser called in client", "username", username)
+    // ...
 }
 
 func (c *UserServiceClient) SimulateRefreshToken(ctx context.Context, refreshToken string) (string, string, error) {
-    c.logger.InfoContext(ctx, "[SIMULATED] RefreshToken called in client", "refreshToken", refreshToken)
-    if refreshToken == "valid-refresh-token" {
-        return "new-simulated-access-token", "new-simulated-refresh-token", nil
-    }
-    return "", "", errors.New("invalid or expired refresh token")
+    reqID, _ := ctx.Value(middleware.RequestIDKey).(string)
+    clientLogger := c.logger.With("request_id", reqID)
+    clientLogger.InfoContext(ctx, "[SIMULATED] RefreshToken called in client", "refreshToken", refreshToken)
+    // ...
 }
 */
+
+// Import chi middleware for GetReqID
+import chi_middleware "github.com/go-chi/chi/v5/middleware"

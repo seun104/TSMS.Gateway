@@ -13,40 +13,49 @@ import (
 	"github.com/go-playground/validator/v10"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/types/known/emptypb"
+	// "google.golang.org/protobuf/types/known/emptypb" // Not directly used in this diff, but likely needed if Delete returns specific type
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"log/slog"
+	chi_middleware "github.com/go-chi/chi/v5/middleware" // For GetReqID
 
 	pb "github.com/AradIT/Arad.SMS.Gateway/golang_services/api/proto/schedulerservice"
 )
 
 type SchedulerHandler struct {
 	schedulerClient pb.SchedulerServiceClient
-	logger          *slog.Logger
+	logger          *slog.Logger // Base logger
 	validate        *validator.Validate
 }
 
 func NewSchedulerHandler(client pb.SchedulerServiceClient, logger *slog.Logger, validate *validator.Validate) *SchedulerHandler {
 	return &SchedulerHandler{
 		schedulerClient: client,
-		logger:          logger,
+		logger:          logger.With("handler", "scheduler"), // Contextualize base logger
 		validate:        validate,
 	}
 }
 
-// Helper to map gRPC errors to HTTP status codes
-func mapGRPCErrorToHTTPStatus(w http.ResponseWriter, logger *slog.Logger, err error, operation string, resourceID string) {
+// Helper to map gRPC errors to HTTP status codes - now uses the request-scoped logger
+func mapGRPCErrorToHTTPStatusAndRespond(w http.ResponseWriter, logger *slog.Logger, err error, operation string, resourceID string) {
 	if err == nil {
 		return
 	}
 	st, ok := status.FromError(err)
 	if !ok {
-		logger.Error(fmt.Sprintf("%s failed: unable to parse gRPC error", operation), "resource_id", resourceID, "error", err)
+		// Use the provided logger which should be request-scoped
+		logger.ErrorContext(context.Background(), // Consider passing original request context if available and safe
+			fmt.Sprintf("%s failed: unable to parse gRPC error", operation),
+			"resource_id", resourceID, "error", err)
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
 
-	logEntry := logger.With("grpc_code", st.Code().String(), "grpc_message", st.Message(), "operation", operation, "resource_id", resourceID)
+	// logger here is already request-scoped
+	logEntry := logger.With("grpc_code", st.Code().String(), "grpc_message", st.Message(), "operation", operation)
+	if resourceID != "" {
+		logEntry = logEntry.With("resource_id", resourceID)
+	}
+
 
 	switch st.Code() {
 	case codes.InvalidArgument:
@@ -72,47 +81,53 @@ func mapGRPCErrorToHTTPStatus(w http.ResponseWriter, logger *slog.Logger, err er
 
 func (h *SchedulerHandler) CreateScheduledMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
 	var reqDTO CreateScheduledMessageRequestDTO
 	if err := json.NewDecoder(r.Body).Decode(&reqDTO); err != nil {
-		h.logger.WarnContext(ctx, "Failed to decode request body for CreateScheduledMessage", "error", err)
+		logger.WarnContext(ctx, "Failed to decode request body for CreateScheduledMessage", "error", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
 	if err := h.validate.StructCtx(ctx, reqDTO); err != nil {
-		h.logger.WarnContext(ctx, "Validation failed for CreateScheduledMessage", "error", err)
+		logger.WarnContext(ctx, "Validation failed for CreateScheduledMessage", "error", err, "dto", reqDTO)
 		http.Error(w, fmt.Sprintf("Validation error: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
 
-	if reqDTO.ScheduleTime.Before(time.Now().Add(10*time.Second)) { // Ensure schedule time is reasonably in future
-		h.logger.WarnContext(ctx, "Validation failed for CreateScheduledMessage: ScheduleTime must be in the future.", "schedule_time", reqDTO.ScheduleTime)
+	if reqDTO.ScheduleTime.Before(time.Now().Add(10*time.Second)) {
+		logger.WarnContext(ctx, "Validation failed: ScheduleTime must be in the future.", "schedule_time", reqDTO.ScheduleTime)
 		http.Error(w, "ScheduleTime must be at least 10 seconds in the future.", http.StatusBadRequest)
 		return
 	}
 
-	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
-	if !ok {
-		h.logger.ErrorContext(ctx, "AuthenticatedUser not found in context for CreateScheduledMessage")
+	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(*middleware.AuthenticatedUser) // Corrected to pointer
+	if !ok || authUser == nil {
+		logger.ErrorContext(ctx, "AuthenticatedUser not found in context")
 		http.Error(w, "User authentication details not found", http.StatusUnauthorized)
 		return
 	}
+	logger = logger.With("auth_user_id", authUser.ID)
 
-	targetUserID := authUser.ID // Default to authenticated user's ID
+
+	targetUserID := authUser.ID
 	if reqDTO.UserID != "" {
-		if reqDTO.UserID != authUser.ID && !authUser.IsAdmin { // Non-admin trying to schedule for someone else
-			h.logger.WarnContext(ctx, "User not authorized to schedule message for another user", "auth_user_id", authUser.ID, "target_user_id", reqDTO.UserID)
+		if reqDTO.UserID != authUser.ID && !authUser.IsAdmin {
+			logger.WarnContext(ctx, "User not authorized to schedule message for another user", "target_user_id", reqDTO.UserID)
 			http.Error(w, "Not authorized to schedule messages for another user", http.StatusForbidden)
 			return
 		}
-		targetUserID = reqDTO.UserID // Admin can specify, or user for themselves
+		targetUserID = reqDTO.UserID
 	}
 
-	if targetUserID == "" { // Should not happen if authUser.ID is always present
-	    h.logger.ErrorContext(ctx, "Target UserID is empty after auth check for CreateScheduledMessage")
+	if targetUserID == "" {
+	    logger.ErrorContext(ctx, "Target UserID is empty after auth check")
 		http.Error(w, "Target UserID could not be determined", http.StatusInternalServerError)
 		return
 	}
+	logger = logger.With("target_user_id_for_message", targetUserID)
 
 
 	grpcReq := &pb.CreateScheduledMessageRequest{
@@ -122,12 +137,13 @@ func (h *SchedulerHandler) CreateScheduledMessage(w http.ResponseWriter, r *http
 		UserId:       targetUserID,
 	}
 
-	h.logger.InfoContext(ctx, "Sending CreateScheduledMessage request to gRPC service", "job_type", grpcReq.JobType, "user_id", grpcReq.UserId)
+	logger.InfoContext(ctx, "Sending CreateScheduledMessage request to gRPC service", "job_type", grpcReq.JobType)
 	grpcRes, err := h.schedulerClient.CreateScheduledMessage(ctx, grpcReq)
 	if err != nil {
-		mapGRPCErrorToHTTPStatus(w, h.logger, err, "CreateScheduledMessage", "")
+		mapGRPCErrorToHTTPStatusAndRespond(w, logger, err, "CreateScheduledMessage", "") // Use updated helper
 		return
 	}
+	logger.InfoContext(ctx, "Scheduled message created successfully", "message_id", grpcRes.Id)
 
 	resDTO := ScheduledMessageDTO{
 		ID:           grpcRes.Id,
@@ -143,36 +159,47 @@ func (h *SchedulerHandler) CreateScheduledMessage(w http.ResponseWriter, r *http
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(resDTO); err != nil {
-		h.logger.ErrorContext(ctx, "Failed to encode response for CreateScheduledMessage", "error", err)
+		logger.ErrorContext(ctx, "Failed to encode response for CreateScheduledMessage", "error", err)
 	}
 }
 
 func (h *SchedulerHandler) GetScheduledMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
 	messageID := chi.URLParam(r, "id")
-	if messageID == "" {
-		h.logger.WarnContext(ctx, "Message ID is required for GetScheduledMessage")
+	logger = logger.With("message_id", messageID)
+
+	if messageID == "" { // Should be caught by Chi route, but good practice
+		logger.WarnContext(ctx, "Message ID is required")
 		http.Error(w, "Message ID is required", http.StatusBadRequest)
 		return
 	}
 
-	// Optional: Check if user is admin or owns the message
-	authUser, _ := ctx.Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
+	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(*middleware.AuthenticatedUser)
+	if !ok || authUser == nil {
+		logger.ErrorContext(ctx, "AuthenticatedUser not found in context")
+		http.Error(w, "User authentication details not found", http.StatusUnauthorized)
+		return
+	}
+	logger = logger.With("auth_user_id", authUser.ID)
+	logger.InfoContext(ctx, "Attempting to get scheduled message")
 
 
 	grpcReq := &pb.GetScheduledMessageRequest{Id: messageID}
-	h.logger.InfoContext(ctx, "Sending GetScheduledMessage request to gRPC service", "id", messageID)
 	grpcRes, err := h.schedulerClient.GetScheduledMessage(ctx, grpcReq)
 	if err != nil {
-		mapGRPCErrorToHTTPStatus(w, h.logger, err, "GetScheduledMessage", messageID)
+		mapGRPCErrorToHTTPStatusAndRespond(w, logger, err, "GetScheduledMessage", messageID) // Use updated helper
 		return
 	}
 
 	if !authUser.IsAdmin && authUser.ID != grpcRes.UserId {
-		h.logger.WarnContext(ctx, "User not authorized to access this scheduled message", "auth_user_id", authUser.ID, "message_owner_id", grpcRes.UserId)
+		logger.WarnContext(ctx, "User not authorized to access this scheduled message", "message_owner_id", grpcRes.UserId)
 		http.Error(w, "Not authorized to access this message", http.StatusForbidden)
 		return
 	}
+	logger.InfoContext(ctx, "Scheduled message retrieved successfully")
 
 	resDTO := ScheduledMessageDTO{
 		ID:           grpcRes.Id,
@@ -187,18 +214,30 @@ func (h *SchedulerHandler) GetScheduledMessage(w http.ResponseWriter, r *http.Re
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resDTO); err != nil {
-		h.logger.ErrorContext(ctx, "Failed to encode response for GetScheduledMessage", "error", err)
+		logger.ErrorContext(ctx, "Failed to encode response for GetScheduledMessage", "error", err)
 	}
 }
 
 func (h *SchedulerHandler) ListScheduledMessages(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	queryParams := r.URL.Query()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
 
+	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(*middleware.AuthenticatedUser)
+	if !ok || authUser == nil {
+		logger.ErrorContext(ctx, "AuthenticatedUser not found in context")
+		http.Error(w, "User authentication details not found", http.StatusUnauthorized)
+		return
+	}
+	logger = logger.With("auth_user_id", authUser.ID)
+	logger.InfoContext(ctx, "Attempting to list scheduled messages")
+
+	queryParams := r.URL.Query()
 	pageSize, _ := strconv.ParseInt(queryParams.Get("page_size"), 10, 32)
 	pageNumber, _ := strconv.ParseInt(queryParams.Get("page_number"), 10, 32)
 	statusFilter := queryParams.Get("status")
 	jobTypeFilter := queryParams.Get("job_type")
+	userIDFilter := queryParams.Get("user_id") // For admin to filter by specific user
 
 	if pageSize <= 0 { pageSize = 10 }
 	if pageNumber <= 0 { pageNumber = 1 }
@@ -210,29 +249,20 @@ func (h *SchedulerHandler) ListScheduledMessages(w http.ResponseWriter, r *http.
 		JobType:    jobTypeFilter,
 	}
 
-	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
-	if !ok {
-		h.logger.ErrorContext(ctx, "AuthenticatedUser not found in context for ListScheduledMessages")
-		http.Error(w, "User authentication details not found", http.StatusUnauthorized)
-		return
-	}
-	// If user is not admin, filter by their UserID
 	if !authUser.IsAdmin {
-		grpcReq.UserId = authUser.ID
-	} else {
-	    // Admin can optionally filter by a specific user_id from query params
-	    if queryParams.Has("user_id") {
-	        grpcReq.UserId = queryParams.Get("user_id")
-        }
+		grpcReq.UserId = authUser.ID // Non-admins can only list their own
+	} else if userIDFilter != "" {
+		grpcReq.UserId = userIDFilter // Admin specified a user to filter by
 	}
+	// If admin and userIDFilter is empty, gRPC service should list for all users (or handle as needed)
 
-
-	h.logger.InfoContext(ctx, "Sending ListScheduledMessages request to gRPC service", "params", grpcReq.String())
+	logger.DebugContext(ctx, "Sending ListScheduledMessages request to gRPC service", "params", grpcReq.String())
 	grpcRes, err := h.schedulerClient.ListScheduledMessages(ctx, grpcReq)
 	if err != nil {
-		mapGRPCErrorToHTTPStatus(w, h.logger, err, "ListScheduledMessages", "")
+		mapGRPCErrorToHTTPStatusAndRespond(w, logger, err, "ListScheduledMessages", "") // Use updated helper
 		return
 	}
+	logger.InfoContext(ctx, "Scheduled messages listed successfully", "count", len(grpcRes.Messages), "total_count", grpcRes.TotalCount)
 
 	resDTOs := make([]ScheduledMessageDTO, len(grpcRes.Messages))
 	for i, msg := range grpcRes.Messages {
@@ -257,69 +287,83 @@ func (h *SchedulerHandler) ListScheduledMessages(w http.ResponseWriter, r *http.
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		h.logger.ErrorContext(ctx, "Failed to encode response for ListScheduledMessages", "error", err)
+		logger.ErrorContext(ctx, "Failed to encode response for ListScheduledMessages", "error", err)
 	}
 }
 
 func (h *SchedulerHandler) UpdateScheduledMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
 	messageID := chi.URLParam(r, "id")
+	logger = logger.With("message_id", messageID)
+
 	if messageID == "" {
-		h.logger.WarnContext(ctx, "Message ID is required for UpdateScheduledMessage")
+		logger.WarnContext(ctx, "Message ID is required")
 		http.Error(w, "Message ID is required", http.StatusBadRequest)
 		return
 	}
 
 	var reqDTO UpdateScheduledMessageRequestDTO
 	if err := json.NewDecoder(r.Body).Decode(&reqDTO); err != nil {
-		h.logger.WarnContext(ctx, "Failed to decode request body for UpdateScheduledMessage", "error", err)
+		logger.WarnContext(ctx, "Failed to decode UpdateScheduledMessage request body", "error", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
+	defer r.Body.Close() // Ensure body is closed
 
 	if err := h.validate.StructCtx(ctx, reqDTO); err != nil {
-		h.logger.WarnContext(ctx, "Validation failed for UpdateScheduledMessage", "error", err)
+		logger.WarnContext(ctx, "Validation failed for UpdateScheduledMessage", "error", err, "dto", reqDTO)
 		http.Error(w, fmt.Sprintf("Validation error: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
 
-	// Check ownership or admin rights before proceeding
-	authUser, _ := ctx.Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
-	if !authUser.IsAdmin { // If not admin, fetch the message to check ownership
+	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(*middleware.AuthenticatedUser)
+    if !ok || authUser == nil {
+        logger.ErrorContext(ctx, "AuthenticatedUser not found in context")
+        http.Error(w, "User authentication details not found", http.StatusUnauthorized)
+        return
+    }
+    logger = logger.With("auth_user_id", authUser.ID)
+	logger.InfoContext(ctx, "Attempting to update scheduled message")
+
+
+	if !authUser.IsAdmin {
 		peekReq := &pb.GetScheduledMessageRequest{Id: messageID}
 		peekRes, err := h.schedulerClient.GetScheduledMessage(ctx, peekReq)
 		if err != nil {
-			mapGRPCErrorToHTTPStatus(w, h.logger, err, "UpdateScheduledMessage (peek)", messageID)
+			mapGRPCErrorToHTTPStatusAndRespond(w, logger, err, "UpdateScheduledMessage (owner check)", messageID)
 			return
 		}
 		if peekRes.UserId != authUser.ID {
-			h.logger.WarnContext(ctx, "User not authorized to update this scheduled message", "auth_user_id", authUser.ID, "message_id", messageID)
+			logger.WarnContext(ctx, "User not authorized to update this scheduled message", "message_owner_id", peekRes.UserId)
 			http.Error(w, "Not authorized to update this message", http.StatusForbidden)
 			return
 		}
 	}
-	// Admins can update any message; non-admins only their own.
 
 	grpcReq := &pb.UpdateScheduledMessageRequest{
 		Id:      messageID,
-		Payload: reqDTO.Payload, // Will be nil if not provided due to omitempty on DTO and map
+		Payload: reqDTO.Payload,
 		Status:  reqDTO.Status,
 	}
 	if reqDTO.ScheduleTime != nil {
-	    if reqDTO.ScheduleTime.Before(time.Now().Add(10*time.Second)) {
-            h.logger.WarnContext(ctx, "Validation failed for UpdateScheduledMessage: ScheduleTime must be in the future.", "schedule_time", reqDTO.ScheduleTime)
+	    if reqDTO.ScheduleTime.Before(time.Now().Add(10*time.Second)) { // Check only if time is actually being updated
+            logger.WarnContext(ctx, "Validation failed: ScheduleTime must be in the future for update.", "schedule_time", reqDTO.ScheduleTime)
             http.Error(w, "ScheduleTime must be at least 10 seconds in the future.", http.StatusBadRequest)
             return
         }
 		grpcReq.ScheduleTime = timestamppb.New(*reqDTO.ScheduleTime)
 	}
 
-	h.logger.InfoContext(ctx, "Sending UpdateScheduledMessage request to gRPC service", "id", messageID, "payload_is_nil", grpcReq.Payload == nil, "scheduletime_is_nil", grpcReq.ScheduleTime == nil, "status", grpcReq.Status)
+	logger.InfoContext(ctx, "Sending UpdateScheduledMessage request to gRPC service", "payload_is_nil", grpcReq.Payload == nil, "scheduletime_is_nil", grpcReq.ScheduleTime == nil, "status", grpcReq.Status)
 	grpcRes, err := h.schedulerClient.UpdateScheduledMessage(ctx, grpcReq)
 	if err != nil {
-		mapGRPCErrorToHTTPStatus(w, h.logger, err, "UpdateScheduledMessage", messageID)
+		mapGRPCErrorToHTTPStatusAndRespond(w, logger, err, "UpdateScheduledMessage", messageID)
 		return
 	}
+	logger.InfoContext(ctx, "Scheduled message updated successfully")
 
 	resDTO := ScheduledMessageDTO{
 		ID:           grpcRes.Id,
@@ -334,43 +378,56 @@ func (h *SchedulerHandler) UpdateScheduledMessage(w http.ResponseWriter, r *http
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resDTO); err != nil {
-		h.logger.ErrorContext(ctx, "Failed to encode response for UpdateScheduledMessage", "error", err)
+		logger.ErrorContext(ctx, "Failed to encode response for UpdateScheduledMessage", "error", err)
 	}
 }
 
 func (h *SchedulerHandler) DeleteScheduledMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
 	messageID := chi.URLParam(r, "id")
+	logger = logger.With("message_id", messageID)
+
 	if messageID == "" {
-		h.logger.WarnContext(ctx, "Message ID is required for DeleteScheduledMessage")
+		logger.WarnContext(ctx, "Message ID is required")
 		http.Error(w, "Message ID is required", http.StatusBadRequest)
 		return
 	}
 
-	// Check ownership or admin rights before proceeding
-	authUser, _ := ctx.Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
-	if !authUser.IsAdmin { // If not admin, fetch the message to check ownership
+	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(*middleware.AuthenticatedUser)
+    if !ok || authUser == nil {
+        logger.ErrorContext(ctx, "AuthenticatedUser not found in context")
+        http.Error(w, "User authentication details not found", http.StatusUnauthorized)
+        return
+    }
+    logger = logger.With("auth_user_id", authUser.ID)
+	logger.InfoContext(ctx, "Attempting to delete scheduled message")
+
+
+	if !authUser.IsAdmin {
 		peekReq := &pb.GetScheduledMessageRequest{Id: messageID}
 		peekRes, err := h.schedulerClient.GetScheduledMessage(ctx, peekReq)
 		if err != nil {
-			mapGRPCErrorToHTTPStatus(w, h.logger, err, "DeleteScheduledMessage (peek)", messageID)
+			mapGRPCErrorToHTTPStatusAndRespond(w, logger, err, "DeleteScheduledMessage (owner check)", messageID)
 			return
 		}
 		if peekRes.UserId != authUser.ID {
-			h.logger.WarnContext(ctx, "User not authorized to delete this scheduled message", "auth_user_id", authUser.ID, "message_id", messageID)
+			logger.WarnContext(ctx, "User not authorized to delete this scheduled message", "message_owner_id", peekRes.UserId)
 			http.Error(w, "Not authorized to delete this message", http.StatusForbidden)
 			return
 		}
 	}
-	// Admins can delete any message; non-admins only their own if status allows (e.g. not 'processing')
 
 	grpcReq := &pb.DeleteScheduledMessageRequest{Id: messageID}
-	h.logger.InfoContext(ctx, "Sending DeleteScheduledMessage request to gRPC service", "id", messageID)
+	logger.DebugContext(ctx, "Sending DeleteScheduledMessage request to gRPC service")
 	_, err := h.schedulerClient.DeleteScheduledMessage(ctx, grpcReq)
 	if err != nil {
-		mapGRPCErrorToHTTPStatus(w, h.logger, err, "DeleteScheduledMessage", messageID)
+		mapGRPCErrorToHTTPStatusAndRespond(w, logger, err, "DeleteScheduledMessage", messageID)
 		return
 	}
+	logger.InfoContext(ctx, "Scheduled message deleted successfully")
 
 	w.WriteHeader(http.StatusNoContent)
 }

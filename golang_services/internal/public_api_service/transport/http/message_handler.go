@@ -10,9 +10,10 @@ import (
 
 	"github.com/aradsms/golang_services/internal/core_sms/domain"
 	"github.com/aradsms/golang_services/internal/platform/messagebroker"
-	outboxRepoIface "github.com/aradsms/golang_services/internal/sms_sending_service/repository" // Interface
-	"github.com/aradsms/golang_services/internal/public_api_service/middleware"     // For AuthenticatedUserContextKey
-	"github.com/go-chi/chi/v5" // Import chi for URL param
+	outboxRepoIface "github.com/aradsms/golang_services/internal/sms_sending_service/repository"
+	"github.com/aradsms/golang_services/internal/public_api_service/middleware"
+	"github.com/go-chi/chi/v5"
+	chi_middleware "github.com/go-chi/chi/v5/middleware" // For GetReqID
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -84,42 +85,54 @@ func (h *MessageHandler) RegisterRoutes(r chi.Router) {
 
 // handleSendMessage (already implemented)
 func (h *MessageHandler) handleSendMessage(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := r.Context().Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
+	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
+	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
 	if !ok || authUser.ID == "" {
-		h.jsonError(w, "User not authenticated", http.StatusUnauthorized)
+		logger.WarnContext(ctx, "User not authenticated for send message")
+		h.jsonError(w, logger, "User not authenticated", http.StatusUnauthorized)
 		return
 	}
+	logger = logger.With("auth_user_id", authUser.ID) // Add UserID to logger context
+
 	var req SendMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonError(w, "Invalid request payload: "+err.Error(), http.StatusBadRequest)
+		logger.ErrorContext(ctx, "Failed to decode send message request", "error", err)
+		h.jsonError(w, logger, "Invalid request payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// TODO: Add validation for req struct using h.validate
+
 	outboxMessageID := uuid.NewString()
 	now := time.Now()
 	initialMessage := &domain.OutboxMessage{
 		ID: outboxMessageID, UserID: authUser.ID, SenderID: req.SenderID, Recipient: req.Recipient,
-		Content: req.Content, Status: domain.MessageStatusQueued, Segments: 1, UserData: req.UserData,
+		Content: req.Content, Status: domain.MessageStatusQueued, Segments: 1, UserData: req.UserData, // TODO: Calculate segments
 		CreatedAt: now, UpdatedAt: now,
 	}
-	_, err := h.outboxRepo.Create(r.Context(), h.dbPool, initialMessage)
+	logger.InfoContext(ctx, "Attempting to create outbox message", "message_id", outboxMessageID)
+	_, err := h.outboxRepo.Create(ctx, h.dbPool, initialMessage) // Assuming Create takes ctx
 	if err != nil {
-		h.logger.ErrorContext(r.Context(), "Failed to create initial outbox message record", "error", err)
-		h.jsonError(w, "Failed to queue message (database error)", http.StatusInternalServerError)
+		logger.ErrorContext(ctx, "Failed to create initial outbox message record", "error", err, "message_id", outboxMessageID)
+		h.jsonError(w, logger, "Failed to queue message (database error)", http.StatusInternalServerError)
 		return
 	}
 	natsPayload := map[string]string{"outbox_message_id": outboxMessageID}
 	payloadBytes, marshalErr := json.Marshal(natsPayload)
 	if marshalErr != nil {
-		h.logger.ErrorContext(r.Context(), "Failed to marshal NATS payload", "error", marshalErr)
-		h.jsonError(w, "Failed to prepare message for sending queue", http.StatusInternalServerError)
+		logger.ErrorContext(ctx, "Failed to marshal NATS payload for send message", "error", marshalErr, "message_id", outboxMessageID)
+		h.jsonError(w, logger, "Failed to prepare message for sending queue", http.StatusInternalServerError)
 		return
 	}
 	subject := "sms.jobs.send"
-	if err := h.natsClient.Publish(r.Context(), subject, payloadBytes); err != nil {
-		h.logger.ErrorContext(r.Context(), "Failed to publish send SMS job to NATS", "error", err)
-		h.jsonError(w, "Failed to send message to processing queue", http.StatusInternalServerError)
+	if pubErr := h.natsClient.Publish(ctx, subject, payloadBytes); pubErr != nil { // Pass ctx to Publish
+		logger.ErrorContext(ctx, "Failed to publish send SMS job to NATS", "error", pubErr, "message_id", outboxMessageID, "subject", subject)
+		h.jsonError(w, logger, "Failed to send message to processing queue", http.StatusInternalServerError)
 		return
 	}
+	logger.InfoContext(ctx, "Send SMS job published to NATS", "message_id", outboxMessageID, "subject", subject)
 	response := SendMessageResponse{
 		MessageID: outboxMessageID, Status: domain.MessageStatusQueued, Recipient: req.Recipient,
 	}
@@ -131,39 +144,45 @@ func (h *MessageHandler) handleSendMessage(w http.ResponseWriter, r *http.Reques
 
 // handleGetMessageStatus retrieves the status of a specific message.
 func (h *MessageHandler) handleGetMessageStatus(w http.ResponseWriter, r *http.Request) {
-	authUser, ok := r.Context().Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
+	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
+	authUser, ok := ctx.Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
 	if !ok || authUser.ID == "" {
-		h.jsonError(w, "User not authenticated", http.StatusUnauthorized)
+		logger.WarnContext(ctx, "User not authenticated for get message status")
+		h.jsonError(w, logger, "User not authenticated", http.StatusUnauthorized)
 		return
 	}
+	logger = logger.With("auth_user_id", authUser.ID)
 
 	messageID := chi.URLParam(r, "messageID")
-	if _, err := uuid.Parse(messageID); err != nil { // Validate if messageID is a UUID
-		h.jsonError(w, "Invalid message ID format", http.StatusBadRequest)
+	if _, err := uuid.Parse(messageID); err != nil {
+		logger.WarnContext(ctx, "Invalid message ID format provided", "message_id", messageID, "error", err)
+		h.jsonError(w, logger, "Invalid message ID format", http.StatusBadRequest)
 		return
 	}
 
-	h.logger.InfoContext(r.Context(), "Fetching message status", "message_id", messageID, "user_id", authUser.ID)
+	logger.InfoContext(ctx, "Fetching message status", "message_id", messageID)
 
-	// The dbPool itself can act as a Querier for non-transactional reads
-	outboxMsg, err := h.outboxRepo.GetByID(r.Context(), h.dbPool, messageID)
+	outboxMsg, err := h.outboxRepo.GetByID(ctx, h.dbPool, messageID) // Pass ctx
 	if err != nil {
-		if errors.Is(err, outboxRepoIface.ErrOutboxMessageNotFound) { // Use interface defined error
-			h.logger.WarnContext(r.Context(), "Outbox message not found", "message_id", messageID)
-			h.jsonError(w, "Message not found", http.StatusNotFound)
+		if errors.Is(err, outboxRepoIface.ErrOutboxMessageNotFound) {
+			logger.InfoContext(ctx, "Outbox message not found by ID", "message_id", messageID)
+			h.jsonError(w, logger, "Message not found", http.StatusNotFound)
 			return
 		}
-		h.logger.ErrorContext(r.Context(), "Failed to get outbox message from repository", "error", err, "message_id", messageID)
-		h.jsonError(w, "Failed to retrieve message status", http.StatusInternalServerError)
+		logger.ErrorContext(ctx, "Failed to get outbox message from repository", "error", err, "message_id", messageID)
+		h.jsonError(w, logger, "Failed to retrieve message status", http.StatusInternalServerError)
 		return
 	}
 
-	// Security check: Ensure the authenticated user is the owner of the message
-	if outboxMsg.UserID != authUser.ID && !authUser.IsAdmin { // Admins can see all messages
-		h.logger.WarnContext(r.Context(), "User attempted to access unauthorized message", "message_id", messageID, "auth_user_id", authUser.ID, "message_owner_id", outboxMsg.UserID)
-		h.jsonError(w, "Forbidden: You do not have permission to view this message", http.StatusForbidden)
+	if outboxMsg.UserID != authUser.ID && !authUser.IsAdmin {
+		logger.WarnContext(ctx, "User attempted to access unauthorized message", "message_id", messageID, "message_owner_id", outboxMsg.UserID)
+		h.jsonError(w, logger, "Forbidden: You do not have permission to view this message", http.StatusForbidden)
 		return
 	}
+	logger.DebugContext(ctx, "Message status retrieved successfully", "message_id", messageID, "status", outboxMsg.Status)
 
 	response := MessageStatusResponse{
 		ID:                  outboxMsg.ID,
@@ -190,9 +209,15 @@ func (h *MessageHandler) handleGetMessageStatus(w http.ResponseWriter, r *http.R
 	json.NewEncoder(w).Encode(response)
 }
 
-// jsonError helper (already defined or shared)
-func (h *MessageHandler) jsonError(w http.ResponseWriter, message string, statusCode int) {
+// jsonError helper (already defined or shared) - needs to accept logger
+func (h *MessageHandler) jsonError(w http.ResponseWriter, logger *slog.Logger, message string, statusCode int) {
+	logger.WarnContext(context.Background(), "API Error Response", "status_code", statusCode, "message", message) // Use a background context if request context might be cancelled
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(GenericErrorResponse{Error: message})
+	json.NewEncoder(w).Encode(GenericErrorResponse{Error: message}) // GenericErrorResponse needs to be defined or use map
+}
+
+// GenericErrorResponse can be defined in a shared DTOs file or locally if not already.
+type GenericErrorResponse struct {
+	Error string `json:"error"`
 }

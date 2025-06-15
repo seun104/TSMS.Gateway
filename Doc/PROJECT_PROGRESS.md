@@ -177,6 +177,7 @@ This document outlines the key implementation steps and progress tracking for re
 (All items below are [ ])
 *   [ ] **Logging (Service-wide):**
     *   [ ] Ensure consistent structured logging in all services.
+        *   [~] Reviewed and updated `user-service`, `public-api-service`. (Other services pending)
     *   [ ] Integrate with centralized logging platform (e.g., ELK, Loki).
 *   [ ] **Monitoring (Service-wide):**
     *   [ ] Implement Prometheus metrics (RED method) for all public API endpoints and key background tasks.

@@ -7,11 +7,11 @@ import (
 	"log/slog"
 	"strings" // For normalizing status strings
 	"time"    // For ProcessedTimestamp
-	"encoding/json" // For marshaling ProcessedDLREvent
+	"encoding/json"
 
-	"github.com/google/uuid" // For parsing MessageID from DTO
-	"github.com/your-repo/project/internal/delivery_retrieval_service/domain"
-	"github.com/your-repo/project/internal/platform/messagebroker" // For NATS client
+	"github.com/google/uuid"
+	"github.com/AradIT/aradsms/golang_services/internal/delivery_retrieval_service/domain" // Corrected
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker" // Corrected
 )
 
 // DLRProcessor is responsible for processing delivery reports, updating the database,
@@ -34,25 +34,29 @@ func NewDLRProcessor(outboxRepo domain.OutboxRepository, natsClient *messagebrok
 // ProcessDLRs iterates through a slice of DeliveryReport objects and updates (This method can be deprecated or removed if only NATS events are used)
 // their corresponding entries in the outbox_messages table.
 func (p *DLRProcessor) ProcessDLRs(ctx context.Context, dlrs []domain.DeliveryReport) error {
+	// Create a logger for this batch operation, could include a batch ID if available/generated
+	batchLogger := p.logger.With("batch_dlr_process_id", uuid.NewString().String()) // Example batch ID
 	if len(dlrs) == 0 {
-		p.logger.InfoContext(ctx, "No DLRs to process.")
+		batchLogger.InfoContext(ctx, "No DLRs to process in batch.")
 		return nil
 	}
 
-	p.logger.InfoContext(ctx, "Starting to process DLRs", "count", len(dlrs))
+	batchLogger.InfoContext(ctx, "Starting to process DLRs batch", "count", len(dlrs))
 
 	var processedCount int
 	var errorCount int
 
 	for _, dlr := range dlrs {
-		p.logger.DebugContext(ctx, "Processing DLR",
-			"message_id", dlr.MessageID,
+		// Create a logger specific to this DLR within the batch
+		dlrLogger := batchLogger.With(
+			"internal_message_id", dlr.MessageID,
 			"provider_message_id", dlr.ProviderMessageID,
+		)
+		dlrLogger.DebugContext(ctx, "Processing DLR from batch",
 			"status", dlr.Status.String(),
 			"provider_status", dlr.ProviderStatus,
 		)
 
-		// ProviderMessageID from DLR might be new or confirm an existing one
 		var providerMsgIDForUpdate sql.NullString
 		if dlr.ProviderMessageID != "" {
 			providerMsgIDForUpdate = sql.NullString{String: dlr.ProviderMessageID, Valid: true}
@@ -71,30 +75,25 @@ func (p *DLRProcessor) ProcessDLRs(ctx context.Context, dlrs []domain.DeliveryRe
 
 		if err != nil {
 			errorCount++
-			p.logger.ErrorContext(ctx, "Failed to update outbox message status for DLR",
+			dlrLogger.ErrorContext(ctx, "Failed to update outbox message status for DLR from batch", // Use dlrLogger
 				"error", err,
-				"message_id", dlr.MessageID,
-				"provider_message_id", dlr.ProviderMessageID,
+				// message_id and provider_message_id are already in dlrLogger context
 				"new_status", dlr.Status.String(),
 			)
-			// Decide if one error should stop processing others. For now, continue.
 		} else {
 			processedCount++
-			p.logger.InfoContext(ctx, "Successfully processed DLR and updated outbox message",
-				"message_id", dlr.MessageID,
+			dlrLogger.InfoContext(ctx, "Successfully processed DLR from batch and updated outbox message", // Use dlrLogger
 				"new_status", dlr.Status.String(),
 			)
 		}
 	}
 
-	p.logger.InfoContext(ctx, "Finished processing DLRs",
+	batchLogger.InfoContext(ctx, "Finished processing DLRs batch", // Use batchLogger
 		"total_received", len(dlrs),
 		"successfully_processed", processedCount,
 		"errors_encountered", errorCount,
 	)
 
-	// Depending on requirements, could return an aggregated error or a summary.
-	// For now, just logging errors and returning nil unless a critical error occurs.
 	return nil
 }
 

@@ -51,22 +51,20 @@ func mapDomainTransactionTypeToProto(dt domain.TransactionType) billingservice.T
 // CheckAndDeductCredit RPC is now used for deducting credit based on message count (segments).
 // Assumes CheckAndDeductCreditRequest proto is updated to include SegmentsToCharge instead of AmountToDeduct.
 func (s *BillingGRPCServer) DeductUserCredit(ctx context.Context, req *billingservice.DeductUserCreditRequest) (*billingservice.DeductUserCreditResponse, error) {
-	s.logger.InfoContext(ctx, "DeductUserCredit gRPC call received",
-		"user_id", req.GetUserId(),
-		"segments_to_charge", req.GetSegmentsToCharge(),
-		"reference_id", req.GetReferenceId())
+	logger := s.logger.With("rpc_method", "DeductUserCredit", "user_id_req", req.GetUserId(), "reference_id", req.GetReferenceId())
+	logger.InfoContext(ctx, "gRPC call received", "segments_to_charge", req.GetSegmentsToCharge())
 
 	userID, err := uuid.Parse(req.GetUserId())
 	if err != nil {
-		s.logger.ErrorContext(ctx, "Invalid UserID format in DeductUserCredit request", "user_id", req.GetUserId(), "error", err)
+		logger.ErrorContext(ctx, "Invalid UserID format in request", "error", err)
 		return nil, status.Errorf(codes.InvalidArgument, "Invalid UserID format: %v", err)
 	}
+	// Add successfully parsed UserID to logger for subsequent logs
+	logger = logger.With("user_id", userID.String())
+
 
 	if req.GetSegmentsToCharge() <= 0 {
-		s.logger.ErrorContext(ctx, "SegmentsToCharge must be positive", "segments", req.GetSegmentsToCharge())
-		// Return an error in the response body as well, as per the proto definition
-		// return &billingservice.DeductUserCreditResponse{Success: false, ErrorMessage: "SegmentsToCharge must be positive"}, status.Errorf(codes.InvalidArgument, "SegmentsToCharge must be positive, got %d", req.GetSegmentsToCharge())
-		// Corrected: gRPC errors should primarily be through status.Errorf. The response message is for client convenience if they don't handle gRPC status details well.
+		logger.ErrorContext(ctx, "SegmentsToCharge must be positive", "segments", req.GetSegmentsToCharge())
         return nil, status.Errorf(codes.InvalidArgument, "SegmentsToCharge must be positive, got %d", req.GetSegmentsToCharge())
 	}
 	numMessages := int(req.GetSegmentsToCharge())
@@ -83,12 +81,8 @@ func (s *BillingGRPCServer) DeductUserCredit(ctx context.Context, req *billingse
 
 	createdTx, err := s.billingApp.DeductCreditForSMS(ctx, userID, numMessages, transactionDetails)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "DeductCreditForSMS application logic failed",
-			"user_id", userID,
-			"segments", numMessages,
-			"error", err)
+		logger.ErrorContext(ctx, "DeductCreditForSMS application logic failed", "segments", numMessages, "error", err)
 
-		// Map domain errors to gRPC status codes and include in response message
 		var errCode codes.Code = codes.Internal
 		var errMsg string = fmt.Sprintf("Billing operation failed: %v", err)
 

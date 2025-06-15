@@ -9,6 +9,7 @@ import (
 
 	// Corrected import for billing app service (assuming BillingAppService struct is in 'app' package)
 	"github.com/AradIT/aradsms/golang_services/internal/billing_service/app"
+	chi_middleware "github.com/go-chi/chi/v5/middleware" // For GetReqID
 )
 
 const MaxRequestBodySize = 1 << 20 // 1 MB
@@ -34,51 +35,47 @@ func NewWebhookHandler(appService PaymentWebhookProcessor, logger *slog.Logger) 
 // HandlePaymentWebhook receives webhook events from a payment gateway.
 func (h *WebhookHandler) HandlePaymentWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID)
+
 	if r.Method != http.MethodPost {
-		h.logger.WarnContext(ctx, "Method not allowed for webhook", "method", r.Method)
+		logger.WarnContext(ctx, "Method not allowed for webhook", "method", r.Method)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Example: Extract a signature header. For Stripe, it's "Stripe-Signature".
-	// For a generic mock, this might be optional or a fixed value.
-	signature := r.Header.Get("X-Payment-Signature") // Using a generic header for now; make configurable per gateway
+	signature := r.Header.Get("X-Payment-Signature")
+	logger = logger.With("signature_present", signature != "")
+
 
 	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodySize)
 	rawPayload, err := io.ReadAll(r.Body)
 	if err != nil {
-		h.logger.ErrorContext(ctx, "Failed to read webhook request body", "error", err)
-		if err.Error() == "http: request body too large" { // Check exact error string if possible
+		logger.ErrorContext(ctx, "Failed to read webhook request body", "error", err)
+		if err.Error() == "http: request body too large" {
 			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
 		} else {
 			http.Error(w, "Error reading request body", http.StatusBadRequest)
 		}
 		return
 	}
-	// It's good practice to close r.Body, but io.ReadAll does it if it reads to EOF.
-	// If there was an error, it might not have, so defer r.Body.Close() can be added before ReadAll.
-	// However, for MaxBytesReader, the original body is replaced.
-	// defer r.Body.Close() // Not strictly needed after ReadAll with MaxBytesReader wrapper, but harmless.
 
-	h.logger.InfoContext(ctx, "Received payment webhook",
+	logger.InfoContext(ctx, "Received payment webhook",
 		"remote_addr", r.RemoteAddr,
-		"content_length", r.ContentLength, // ContentLength from header, actual might differ
-		"payload_size", len(rawPayload),
-		"signature_present", signature != "")
+		"content_length", r.ContentLength,
+		"payload_size", len(rawPayload))
 
 	if err := h.appService.HandlePaymentWebhook(ctx, rawPayload, signature); err != nil {
-		h.logger.ErrorContext(ctx, "Error processing payment webhook", "error", err)
+		logger.ErrorContext(ctx, "Error processing payment webhook", "error", err)
 
-		// Check for specific error types or messages to return appropriate HTTP status codes
-		// This uses string comparison, which is fragile. Ideally, use custom error types/wrapping.
 		errStr := err.Error()
 		if strings.Contains(errStr, "webhook signature verification failed") ||
-		   strings.Contains(errStr, "invalid signature") { // Example error messages from adapter
+		   strings.Contains(errStr, "invalid signature") {
 			http.Error(w, "Webhook signature verification failed", http.StatusBadRequest)
-		} else if strings.Contains(errStr, "payment intent not found") { // Example from app service
-            http.Error(w, "Payment intent not found", http.StatusNotFound) // Or StatusBadRequest if the ID was malformed
-        } else if strings.Contains(errStr, "already processed") { // Example for idempotency
-            http.Error(w, "Webhook event already processed", http.StatusOK) // Or 202 Accepted
+		} else if strings.Contains(errStr, "payment intent not found") {
+            http.Error(w, "Payment intent not found", http.StatusNotFound)
+        } else if strings.Contains(errStr, "already processed") {
+            http.Error(w, "Webhook event already processed", http.StatusOK)
         } else {
 			http.Error(w, "Internal server error processing webhook", http.StatusInternalServerError)
 		}
@@ -87,7 +84,7 @@ func (h *WebhookHandler) HandlePaymentWebhook(w http.ResponseWriter, r *http.Req
 
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write([]byte("Webhook received successfully")); err != nil {
-        h.logger.WarnContext(ctx, "Failed to write webhook success response", "error", err)
+        logger.WarnContext(ctx, "Failed to write webhook success response", "error", err)
     }
-	h.logger.InfoContext(ctx, "Payment webhook processed successfully")
+	logger.InfoContext(ctx, "Payment webhook processed successfully")
 }

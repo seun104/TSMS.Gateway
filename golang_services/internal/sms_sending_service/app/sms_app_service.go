@@ -223,12 +223,13 @@ func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPay
         amountToDeduct := 1.0 // Placeholder: 1 unit of credit per SMS
         deductReq := &billingservice.DeductCreditRequest{
             UserId:           outboxMsg.UserID,
-            AmountToDeduct:   amountToDeduct,
-            TransactionType:  string(domain.TransactionTypeSMSCharge), // domain.TransactionType defined in billing_service
-            Description:      fmt.Sprintf("SMS charge for message to %s", outboxMsg.Recipient),
-            RelatedMessageId: &outboxMsg.ID,
+            // AmountToDeduct:   amountToDeduct, // This field is deprecated in proto
+            SegmentsToCharge: int32(outboxMsg.Segments), // Assuming this is the new field and maps to segments
+            // TransactionType:  string(coreSmsDomain.TransactionTypeSMSCharge), // Type is determined by billing service now
+            Description:      fmt.Sprintf("SMS charge for message to %s (msgID: %s)", outboxMsg.Recipient, outboxMsg.ID),
+            ReferenceId:      outboxMsg.ID, // Use outboxMsg.ID as reference for billing transaction
         }
-        s.logger.InfoContext(ctx, "Calling billing service to deduct credit", "userID", outboxMsg.UserID, "amount", amountToDeduct)
+        s.logger.InfoContext(ctx, "Calling billing service to deduct credit", "userID", outboxMsg.UserID, "segments", outboxMsg.Segments)
 
         billingCtx, billingCancel := context.WithTimeout(ctx, 30*time.Second) // Timeout for gRPC call
         defer billingCancel()
@@ -262,7 +263,7 @@ func (s *SMSSendingAppService) processSMSJob(ctx context.Context, job NATSJobPay
             errMsg := fmt.Sprintf("Routing error: %v", routeErr)
             sentAt := time.Now()
             // Consider a specific status for routing failure if different from general config error
-            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, domain.MessageStatusFailedConfiguration, nil, nil, sentAt, &errMsg); errUpdate != nil {
+            if errUpdate := s.outboxRepo.UpdatePostSendInfo(ctx, tx, outboxMsg.ID, coreSmsDomain.MessageStatusFailedConfiguration, nil, nil, sentAt, &errMsg); errUpdate != nil { // Use coreSmsDomain
                 s.logger.ErrorContext(ctx, "Failed to update outbox after routing error", "error", errUpdate, "id", outboxMsg.ID)
             }
             return fmt.Errorf(errMsg) // Stop processing this job due to routing error

@@ -5,11 +5,12 @@ import (
 	"errors"
 	"log/slog"
 
-	// Adjust import paths as necessary
-	"github.com/aradsms/golang_services/api/proto/userservice" // Path to generated protobuf Go code
-	"github.com/aradsms/golang_services/internal/user_service/app"
-	"github.com/aradsms/golang_services/internal/user_service/repository" // For app.ErrTokenInvalid
+	"github.com/AradIT/aradsms/golang_services/api/proto/userservice" // Corrected
+	"github.com/AradIT/aradsms/golang_services/internal/user_service/app" // Corrected
+	"github.com/AradIT/aradsms/golang_services/internal/user_service/repository" // Corrected & For app.ErrTokenInvalid
     "github.com/golang-jwt/jwt/v5"
+	"google.golang.org/grpc/codes"    // For gRPC status codes
+	"google.golang.org/grpc/status"   // For gRPC status codes
 )
 
 // AuthGRPCServer implements the gRPC server for AuthServiceInternal.
@@ -33,17 +34,18 @@ func NewAuthGRPCServer(authApp *app.AuthService, logger *slog.Logger, jwtAccessS
 // This implementation assumes the token is a JWT access token.
 // API Key validation would need a different path or a combined strategy.
 func (s *AuthGRPCServer) ValidateToken(ctx context.Context, req *userservice.ValidateTokenRequest) (*userservice.ValidatedUserResponse, error) {
-	s.logger.InfoContext(ctx, "ValidateToken RPC called")
+	logger := s.logger.With("rpc_method", "ValidateToken") // Add RPC method to logger context
+	logger.InfoContext(ctx, "RPC call received")
 
 	if req.Token == "" {
-		s.logger.WarnContext(ctx, "ValidateToken called with empty token")
-		return nil, errors.New("token is required")
+		logger.WarnContext(ctx, "Request with empty token")
+		return nil, status.Error(codes.InvalidArgument, "token is required")
 	}
 
-    // Try to parse as JWT first (assuming access tokens are JWTs)
     token, err := jwt.Parse(req.Token, func(token *jwt.Token) (interface{}, error) {
         if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-            return nil, errors.New("unexpected signing method in token")
+			logger.ErrorContext(ctx, "Unexpected signing method in token", "algorithm", token.Header["alg"])
+            return nil, status.Errorf(codes.Unauthenticated, "unexpected signing method: %v", token.Header["alg"])
         }
         return []byte(s.jwtAccessSecret), nil
     })
@@ -51,71 +53,67 @@ func (s *AuthGRPCServer) ValidateToken(ctx context.Context, req *userservice.Val
     if err == nil && token.Valid {
         claims, ok := token.Claims.(jwt.MapClaims)
         if !ok {
-            s.logger.ErrorContext(ctx, "Failed to parse JWT claims", "token", req.Token)
-            return nil, errors.New("invalid token claims")
+            logger.ErrorContext(ctx, "Failed to parse JWT claims", "token_string", req.Token)
+            return nil, status.Error(codes.Unauthenticated, "invalid token claims")
         }
 
         userID, _ := claims["sub"].(string)
+		logger := logger.With("auth_user_id", userID) // Add userID to logger context
+
         username, _ := claims["unm"].(string)
         roleID, _ := claims["rol"].(string)
         isAdmin, _ := claims["adm"].(bool)
-        // isActive needs to be fetched from DB if not in token or if freshness is critical
-        // For simplicity, we assume if token is valid, user is active, or this check happens elsewhere.
 
-        // Fetch permissions for the user
-        perms, err := s.authApp.GetUserPermissions(ctx, userID)
-        if err != nil {
-            s.logger.ErrorContext(ctx, "Failed to get user permissions during token validation", "error", err, "userID", userID)
-            // Decide if this should fail the validation or return user without perms
-            return nil, errors.New("could not retrieve user permissions")
+        perms, permErr := s.authApp.GetUserPermissions(ctx, userID)
+        if permErr != nil {
+            logger.ErrorContext(ctx, "Failed to get user permissions during JWT validation", "error", permErr)
+            return nil, status.Errorf(codes.Internal, "could not retrieve user permissions: %v", permErr)
         }
         var permNames []string
         for _, p := range perms {
             permNames = append(permNames, p.Name)
         }
 
-        // Fetch user to check IsActive status
-        // Accessing UserRepo directly is a temporary workaround.
-        // Consider adding a method to app.AuthService like GetUserActiveStatus(userID)
-        // or ensure ValidateToken in AuthService returns all necessary details including IsActive.
-        user, errUserRepo := s.authApp.GetUserRepo().GetByID(ctx, userID)
-        if errUserRepo != nil {
-             s.logger.ErrorContext(ctx, "User not found when checking IsActive", "error", errUserRepo, "userID", userID)
-             return nil, errors.New("user not found or error fetching user details")
+        user, userErr := s.authApp.GetUserRepo().GetByID(ctx, userID) // Assuming GetUserRepo is available
+        if userErr != nil {
+             logger.ErrorContext(ctx, "User not found when checking IsActive during JWT validation", "error", userErr)
+             return nil, status.Errorf(codes.NotFound, "user not found or error fetching user details: %v", userErr)
         }
+		if !user.IsActive {
+			logger.WarnContext(ctx, "JWT valid but user is inactive")
+			return nil, status.Error(codes.PermissionDenied, "user account is not active")
+		}
 
-
+		logger.InfoContext(ctx, "JWT validation successful")
         return &userservice.ValidatedUserResponse{
             UserId:      userID,
             Username:    username,
             RoleId:      roleID,
             IsAdmin:     isAdmin,
             Permissions: permNames,
-            IsActive:    user.IsActive, // Get actual IsActive status
+            IsActive:    user.IsActive,
         }, nil
     }
-    s.logger.InfoContext(ctx, "Token not a valid JWT, trying API Key validation", "jwt_error", err)
+    logger.InfoContext(ctx, "Token not a valid JWT, trying API Key validation", "jwt_parse_error", err)
 
-
-    // If not a valid JWT, try to validate as an API Key
-    // This assumes API keys are passed in the same 'token' field for simplicity here.
-    // In a real scenario, you might have different RPCs or a type field in the request.
     user, apiKeyErr := s.authApp.ValidateAPIKey(ctx, req.Token)
     if apiKeyErr == nil && user != nil {
+		logger := logger.With("auth_user_id", user.ID) // Add userID to logger context
+
          if !user.IsActive {
-            s.logger.WarnContext(ctx, "API Key valid but user is inactive", "userID", user.ID)
-            return nil, errors.New("user account is not active")
+            logger.WarnContext(ctx, "API Key valid but user is inactive")
+            return nil, status.Error(codes.PermissionDenied, "user account is not active")
         }
-        perms, err := s.authApp.GetUserPermissions(ctx, user.ID)
-        if err != nil {
-            s.logger.ErrorContext(ctx, "Failed to get user permissions for API key user", "error", err, "userID", user.ID)
-            return nil, errors.New("could not retrieve user permissions")
+        perms, permErr := s.authApp.GetUserPermissions(ctx, user.ID)
+        if permErr != nil {
+            logger.ErrorContext(ctx, "Failed to get user permissions for API key user", "error", permErr)
+            return nil, status.Errorf(codes.Internal, "could not retrieve user permissions: %v", permErr)
         }
         var permNames []string
         for _, p := range perms {
             permNames = append(permNames, p.Name)
         }
-
+		logger.InfoContext(ctx, "API Key validation successful")
         return &userservice.ValidatedUserResponse{
             UserId:      user.ID,
             Username:    user.Username,
@@ -125,25 +123,28 @@ func (s *AuthGRPCServer) ValidateToken(ctx context.Context, req *userservice.Val
             IsActive:    user.IsActive,
         }, nil
     }
-    s.logger.WarnContext(ctx, "Token validation failed for both JWT and API Key", "apiKeyError", apiKeyErr)
-    return nil, app.ErrTokenInvalid // Use a common error
+    logger.WarnContext(ctx, "Token validation failed for both JWT and API Key", "api_key_error", apiKeyErr)
+    return nil, status.Errorf(codes.Unauthenticated, "%s", app.ErrTokenInvalid.Error())
 }
 
 
 // GetUserPermissions retrieves all permissions for a given user.
 func (s *AuthGRPCServer) GetUserPermissions(ctx context.Context, req *userservice.GetUserPermissionsRequest) (*userservice.GetUserPermissionsResponse, error) {
-	s.logger.InfoContext(ctx, "GetUserPermissions RPC called", "userID", req.UserId)
+	logger := s.logger.With("rpc_method", "GetUserPermissions", "user_id_req", req.GetUserId())
+	logger.InfoContext(ctx, "RPC call received")
+
 	if req.UserId == "" {
-		return nil, errors.New("user_id is required")
+		logger.WarnContext(ctx, "Request with empty user_id")
+		return nil, status.Error(codes.InvalidArgument, "user_id is required")
 	}
 
 	permissions, err := s.authApp.GetUserPermissions(ctx, req.UserId)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "Failed to get user permissions", "error", err, "userID", req.UserId)
-        if errors.Is(err, repository.ErrUserNotFound) || errors.Is(err, app.ErrUserNotFound) { // app.ErrUserNotFound might be more appropriate
-            return nil, errors.New("user not found")
+		logger.ErrorContext(ctx, "Failed to get user permissions from app service", "error", err)
+        if errors.Is(err, repository.ErrUserNotFound) || errors.Is(err, app.ErrUserNotFound) {
+            return nil, status.Errorf(codes.NotFound, "user not found: %v", err)
         }
-		return nil, errors.New("internal server error retrieving permissions")
+		return nil, status.Errorf(codes.Internal, "internal server error retrieving permissions: %v", err)
 	}
 
 	var permNames []string
