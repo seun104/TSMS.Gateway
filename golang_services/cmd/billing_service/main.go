@@ -40,6 +40,31 @@ const (
 	shutdownTimeout = 15 * time.Second // Shared timeout for graceful shutdown
 )
 
+// httpLogger is a middleware that logs HTTP requests using slog.
+func httpLogger(logger *slog.Logger) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		fn := func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			ww := chiMiddleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			requestID := chiMiddleware.GetReqID(r.Context())
+			remoteIP := chiMiddleware.GetRealIP(r.Context())
+
+			next.ServeHTTP(ww, r)
+
+			duration := time.Since(start)
+
+			logger.LogAttrs(r.Context(), slog.LevelInfo, "HTTP request",
+				slog.String("method", r.Method),
+				slog.String("path", r.URL.Path),
+				slog.Int("status_code", ww.Status()),
+				slog.Int64("duration_ms", duration.Milliseconds()),
+				slog.String("request_id", requestID),
+				slog.String("remote_ip", remoteIP),
+			)
+		}
+		return http.HandlerFunc(fn)
+	}
+}
 
 func main() {
 	mainCtx, mainCancel := context.WithCancel(context.Background())
@@ -122,8 +147,8 @@ func main() {
 	httpRouter := chi.NewRouter()
 	httpRouter.Use(chiMiddleware.RequestID)
 	httpRouter.Use(chiMiddleware.RealIP)
-	httpRouter.Use(chiMiddleware.Recoverer)
-	// TODO: Add logging middleware for HTTP requests if desired
+	httpRouter.Use(chiMiddleware.Recoverer) // Recover from panics
+	httpRouter.Use(httpLogger(appLogger))   // Log HTTP requests using our new middleware
 	httpRouter.Post("/webhooks/payments", webhookHandler.HandlePaymentWebhook) // Define a clear route
 
 	httpServer := &http.Server{

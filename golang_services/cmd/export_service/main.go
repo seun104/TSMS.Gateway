@@ -8,10 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/AradIT/aradsms/golang_services/internal/export_service/app"
-	"github.com/AradIT/aradsms/golang_services/internal/export_service/repository/postgres"
 	"errors" // For http.ErrServerClosed check
+
 	"github.com/AradIT/aradsms/golang_services/internal/export_service/app"
 	exportDomain "github.com/AradIT/aradsms/golang_services/internal/export_service/domain" // For NATS subject constants
 	"github.com/AradIT/aradsms/golang_services/internal/export_service/repository/postgres"
@@ -31,33 +29,36 @@ func main() {
 	mainCtx, mainCancel := context.WithCancel(context.Background())
 	defer mainCancel()
 
-	// Initialize Logger
-	appLogger := logger.New("info")
-	appLogger = appLogger.With("service", serviceName)
-	appLogger.Info("Export service starting...")
-
 	// Load Configuration
 	cfg, err := config.Load(serviceName)
 	if err != nil {
-		appLogger.Error("Failed to load configuration", "error", err)
+		// Use slog.Default() for logging if appLogger is not yet initialized
+		slog.Error("Failed to load configuration", "service", serviceName, "error", err)
 		os.Exit(1)
 	}
-	appLogger = logger.New(cfg.LogLevel).With("service", serviceName) // Re-initialize with loaded level
-	appLogger.Info("Configuration loaded successfully", "log_level", cfg.LogLevel)
 
-	// Example: Check if export path is configured
-	// Assuming Config struct has `ExportPath string `mapstructure:"EXPORT_SERVICE_EXPORT_PATH"`
-	// exportPath := cfg.ExportServiceExportPath
-	exportPath := "" // Placeholder until EXPORT_SERVICE_EXPORT_PATH is added to config.go
-	if exportPath == "" {
-		exportPath = "/tmp/exports_service_default" // Default if not in config
-		appLogger.Warn("Export path not configured (APP_EXPORT_SERVICE_EXPORT_PATH), using default", "path", exportPath)
-	}
-	if err := os.MkdirAll(exportPath, 0750); err != nil {
-		appLogger.Error("Failed to create default export directory during startup", "path", exportPath, "error", err)
-		// Decide if this is fatal. For now, log and continue, service methods will fail if path is unusable.
-	}
+	// Initialize Logger
+	appLogger := logger.New(cfg.LogLevel)
+	appLogger = appLogger.With("service", serviceName)
+	appLogger.Info("Export service starting...")
 
+	// Log essential configuration details
+	appLogger.Info("Configuration loaded",
+		"log_level", cfg.LogLevel,
+		"nats_url", cfg.NATSURL,
+		"export_path_configured", cfg.ExportServiceExportPath != "",
+	)
+
+	// Determine and create export path
+	effectiveExportPath := cfg.ExportServiceExportPath
+	if effectiveExportPath == "" {
+		effectiveExportPath = "/tmp/exports_service_default" // Default if not in config
+		appLogger.Warn("Export path not configured (APP_EXPORT_SERVICE_EXPORT_PATH), using default", "path", effectiveExportPath)
+	}
+	if err := os.MkdirAll(effectiveExportPath, 0750); err != nil {
+		appLogger.Error("Failed to create export directory during startup", "path", effectiveExportPath, "error", err)
+		// Decide if this is fatal. For now, log and continue.
+	}
 
 	// Initialize Database (PostgreSQL)
 	dbPool, err := database.NewDBPool(mainCtx, cfg.PostgresDSN, appLogger)
@@ -73,21 +74,21 @@ func main() {
 	appLogger.Info("OutboxExportRepository initialized")
 
 	// Initialize Application Services
-	exportService := app.NewExportService(outboxExportRepo, appLogger, exportPath)
+	exportService := app.NewExportService(outboxExportRepo, appLogger, effectiveExportPath)
 	appLogger.Info("ExportService initialized")
 
 	// Initialize NATS Client
-	if cfg.NATSUrl == "" {
+	if cfg.NATSURL == "" {
 		appLogger.Error("NATS URL not configured (APP_NATS_URL)")
 		os.Exit(1)
 	}
-	natsClient, err := messagebroker.NewNATSClient(cfg.NATSUrl, appLogger, serviceName)
+	natsClient, err := messagebroker.NewNATSClient(cfg.NATSURL, appLogger, serviceName)
 	if err != nil {
 		appLogger.Error("Failed to connect to NATS", "error", err)
 		os.Exit(1)
 	}
 	defer natsClient.Close()
-	appLogger.Info("NATS client connected", "url", cfg.NATSUrl)
+	appLogger.Info("NATS client connected", "url", cfg.NATSURL)
 
 
 	// Setup for graceful shutdown using errgroup
@@ -174,7 +175,7 @@ func main() {
 	})
 
 
-	appLogger.Info("Export service is running (placeholder, no active workers yet). Waiting for shutdown signal.")
+	appLogger.Info("Export service is ready and running.")
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		appLogger.Error("Service group encountered an error during run", "error", err)
 	}

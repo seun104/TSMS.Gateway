@@ -11,171 +11,142 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	"errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection" // For gRPC server reflection
 
-	// Platform packages (adjust to actual project structure)
-	"github.com/your-repo/project/internal/platform/config"
-	"github.com/your-repo/project/internal/platform/database"
-	"github.com/your-repo/project/internal/platform/logger"
-	"github.com/your-repo/project/internal/platform/messagebroker"
+	// Platform packages
+	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/database"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/logger"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker"
 
 	// Phonebook service specific packages
-	pb "github.com/your-repo/project/golang_services/api/proto/phonebookservice" // Generated gRPC code
-	grpcAdapter "github.com/your-repo/project/internal/phonebook_service/adapters/grpc"    // Your gRPC server implementation
-	phonebookApp "github.com/your-repo/project/internal/phonebook_service/app"            // Application layer
-	"github.com/your-repo/project/internal/phonebook_service/repository/postgres" // Repository implementations
+	pb "github.com/AradIT/aradsms/golang_services/api/proto/phonebookservice" // Generated gRPC code
+	grpcAdapter "github.com/AradIT/aradsms/golang_services/internal/phonebook_service/adapters/grpc"    // Your gRPC server implementation
+	phonebookApp "github.com/AradIT/aradsms/golang_services/internal/phonebook_service/app"            // Application layer
+	"github.com/AradIT/aradsms/golang_services/internal/phonebook_service/repository/postgres" // Repository implementations
 )
 
 const (
 	serviceName     = "phonebook_service"
-	startupTimeout  = 30 * time.Second
-	shutdownTimeout = 30 * time.Second // gRPC might need more time to drain connections
+	// startupTimeout  = 30 * time.Second // Unused
+	shutdownTimeout = 15 * time.Second // Standardized shutdown timeout
 )
 
 func main() {
 	mainCtx, mainCancel := context.WithCancel(context.Background())
 	defer mainCancel()
 
-	log := logger.New(serviceName, "dev") // Or load level from config
-	log.Info("Starting service...")
-
+	// Load Configuration
 	cfg, err := config.Load(serviceName)
 	if err != nil {
-		log.Error("Failed to load configuration", "error", err)
+		slog.Error("Failed to load configuration", "service", serviceName, "error", err)
 		os.Exit(1)
 	}
-	log.Info("Configuration loaded successfully")
-	// Example: log.Info("gRPC Port", "port", cfg.PhonebookService.GRPCPort)
 
-	dbPool, err := database.NewPostgresPool(mainCtx, cfg.Postgres.DSN, log)
+	// Initialize Logger
+	appLogger := logger.New(cfg.LogLevel)
+	appLogger = appLogger.With("service", serviceName)
+	appLogger.Info("Starting service...")
+
+	// Log Key Configuration Details
+	appLogger.Info("Configuration loaded",
+		"log_level", cfg.LogLevel,
+		"nats_url", cfg.NATSURL, // Will be empty if not set
+		"postgres_dsn_present", cfg.PostgresDSN != "",
+		"grpc_port", cfg.PhonebookServiceGRPCPort,
+	)
+
+	// Initialize Database
+	dbPool, err := database.NewDBPool(mainCtx, cfg.PostgresDSN, appLogger)
 	if err != nil {
-		log.Error("Failed to initialize database connection pool", "error", err)
+		appLogger.Error("Failed to initialize database connection pool", "error", err)
 		os.Exit(1)
 	}
 	defer dbPool.Close()
-	log.Info("Database connection pool initialized")
+	appLogger.Info("Database connection pool initialized")
 
-	// NATS (Optional for phonebook, but kept for pattern consistency)
-	natsClient, err := messagebroker.NewNATSClient(cfg.NATS.URL, log, serviceName)
-	if err != nil {
-		log.Warn("Failed to connect to NATS (optional for this service)", "error", err)
-		// For some services, NATS might be critical. For phonebook, perhaps not.
+	// Initialize NATS Client (Optional)
+	if cfg.NATSURL != "" {
+		natsClient, err := messagebroker.NewNATSClient(cfg.NATSURL, appLogger, serviceName)
+		if err != nil {
+			appLogger.Error("Failed to connect to NATS", "url", cfg.NATSURL, "error", err)
+			// Depending on service requirements, this might be a fatal error.
+			// For now, assume it's not critical for phonebook if it fails to connect.
+		} else {
+			defer natsClient.Close()
+			appLogger.Info("NATS client connected", "url", cfg.NATSURL)
+		}
 	} else {
-		defer natsClient.Close()
-		log.Info("NATS connection initialized (if configured and successful)")
+		appLogger.Info("NATS URL not configured, NATS client will not be initialized.")
 	}
 
 	// Setup application components
-	// Setup application components
-	phonebookRepo := postgres.NewPgPhonebookRepository(dbPool, log)
-	contactRepo := postgres.NewPgContactRepository(dbPool, log)
-	application := phonebookApp.NewApplication(phonebookRepo, contactRepo, log)
-	grpcServerInstance := grpcAdapter.NewGRPCServer(application, log)
+	phonebookRepo := postgres.NewPgPhonebookRepository(dbPool, appLogger)
+	contactRepo := postgres.NewPgContactRepository(dbPool, appLogger)
+	application := phonebookApp.NewApplication(phonebookRepo, contactRepo, appLogger)
+	grpcServerInstance := grpcAdapter.NewGRPCServer(application, appLogger)
+
+	// Initialize gRPC server
+	grpcServer := grpc.NewServer()
+	pb.RegisterPhonebookServiceServer(grpcServer, grpcServerInstance)
+	reflection.Register(grpcServer) // Enable server reflection
 
 	g, groupCtx := errgroup.WithContext(mainCtx)
 
-	// Start gRPC server
+	// Start gRPC server goroutine
 	g.Go(func() error {
-		// grpcPort := cfg.PhonebookService.GRPCPort // Assuming port is in config from a PhonebookService specific section
-		// For now, using a hardcoded or general config value if available.
-		// If cfg.GRPCPort is a general gRPC port for any service:
-		// grpcPort := cfg.GRPCPort
-		// If specific config like cfg.PhonebookService.GRPCPort:
-		// grpcPort := cfg.PhonebookService.GRPCPort
-		// Fallback to a default if not in config for now:
-		grpcPort := 50051 // Default, or get from cfg.PhonebookService.GRPCPort or cfg.APP_GRPC_PORT
-		if cfg.AppSpecific["APP_GRPC_PORT"] != "" { // Example how config might be structured
-            parsedPort, parseErr := time.ParseDuration(cfg.AppSpecific["APP_GRPC_PORT"]) // This is incorrect for port number
-            // Correct parsing for integer port:
-            // portStr := cfg.AppSpecific["APP_GRPC_PORT"]
-            // if portVal, convErr := strconv.Atoi(portStr); convErr == nil {
-            //    grpcPort = portVal
-            // } else {
-            //    log.Warn("Could not parse APP_GRPC_PORT from config, using default", "value", portStr, "error", convErr)
-            // }
-            // For now, keeping the hardcoded default or expecting a direct int field in config.
-            // Example: grpcPort = cfg.PhonebookGRPCPort
-        }
-
-
-		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", grpcPort))
+		listenAddress := fmt.Sprintf(":%d", cfg.PhonebookServiceGRPCPort)
+		appLogger.Info("gRPC server starting", "address", listenAddress)
+		lis, err := net.Listen("tcp", listenAddress)
 		if err != nil {
-			log.Error("Failed to listen for gRPC", "port", grpcPort, "error", err)
-			return fmt.Errorf("failed to listen for gRPC on port %d: %w", grpcPort, err)
+			appLogger.Error("Failed to listen for gRPC", "address", listenAddress, "error", err)
+			return fmt.Errorf("failed to listen for gRPC on %s: %w", listenAddress, err)
 		}
 		defer lis.Close()
 
-		s := grpc.NewServer(
-		// Add interceptors here if needed:
-		// grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer( /* your interceptors */ )),
-		// grpc.StreamInterceptor(grpc_middleware.ChainStreamServer( /* your interceptors */ )),
-		)
-
-		pb.RegisterPhonebookServiceServer(s, grpcServerInstance) // Register your service
-		log.Info("gRPC PhonebookService registered")
-
-		// Enable server reflection (useful for tools like grpcurl)
-		reflection.Register(s)
-		log.Info("gRPC server reflection registered.")
-
-		log.Info(fmt.Sprintf("gRPC server starting on port %d", grpcPort))
-		if err := s.Serve(lis); err != nil {
-			log.Error("gRPC server failed to serve", "error", err)
-			return fmt.Errorf("gRPC server failed: %w", err)
+		if err := grpcServer.Serve(lis); err != nil && !errors.Is(err, grpc.ErrServerStopped) {
+			appLogger.Error("gRPC server failed to serve", "error", err)
+			return err
 		}
+		appLogger.Info("gRPC server stopped gracefully.")
 		return nil
 	})
 
-	log.Info("Service components initialized and workers started. Service is ready.")
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	var groupErr error
-	select {
-	case sig := <-sigCh:
-		log.Info("Received termination signal", "signal", sig)
-	case groupErr = <-watchGroup(g): // This will block until a goroutine in the group errors or all complete.
-		log.Error("A critical component failed, initiating shutdown", "error", groupErr)
-	}
-
-	log.Info("Attempting graceful shutdown...")
-	mainCancel() // Signal all goroutines in the errgroup to stop
-
-	// Give goroutines time to finish.
-	// For gRPC, s.GracefulStop() should be called, which is implicitly handled if s.Serve is part of the errgroup.
-	// The errgroup's context cancellation will cause lis.Accept to error, stopping s.Serve.
-	// Then s.GracefulStop() (or s.Stop() if forced) would be called by the defer in its goroutine if structured that way,
-	// or by a specific shutdown sequence if needed.
-	// Here, we rely on the errgroup context to signal shutdown to s.Serve().
-	// A more explicit s.GracefulStop() might be added if the grpc.Server instance `s` is accessible here.
-
-	shutdownComplete := make(chan struct{})
-	go func() {
-		defer close(shutdownComplete)
-		if err := g.Wait(); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
-			log.Error("Error during graceful shutdown of components", "error", err)
-		} else if groupErr != nil && groupErr != context.Canceled && groupErr != context.DeadlineExceeded {
-			log.Error("Shutdown initiated due to component error", "error", groupErr)
+	// Goroutine for handling termination signals
+	g.Go(func() error {
+		stopSignal := make(chan os.Signal, 1)
+		signal.Notify(stopSignal, syscall.SIGINT, syscall.SIGTERM)
+		select {
+		case sig := <-stopSignal:
+			appLogger.Info("Received termination signal", "signal", sig.String())
+			mainCancel() // Initiate shutdown for all components
+			return nil
+		case <-groupCtx.Done(): // If any other goroutine in the group errors out or mainCancel is called
+			return nil // Context already cancelled, just exit
 		}
-	}()
+	})
 
-	select {
-	case <-shutdownComplete:
-		log.Info("All components shut down gracefully.")
-	case <-time.After(shutdownTimeout):
-		log.Error("Shutdown timed out. Forcing exit.")
+	// Goroutine for graceful gRPC server shutdown
+	g.Go(func() error {
+		<-groupCtx.Done() // Wait for shutdown signal (from mainCancel or other error)
+		appLogger.Info("Initiating graceful shutdown of gRPC server...")
+		grpcServer.GracefulStop()
+		appLogger.Info("gRPC server has been shut down gracefully.")
+		return nil
+	})
+
+	appLogger.Info("Service is ready and running.")
+
+	// Wait for all goroutines in the group to complete
+	if err := g.Wait(); err != nil {
+		// Errors other than context.Canceled (which is expected on shutdown) should be logged.
+		// grpc.ErrServerStopped is also expected.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, grpc.ErrServerStopped) {
+			appLogger.Error("Service group encountered an error", "error", err)
+		}
 	}
 
-	log.Info("Service shutdown complete.")
-}
-
-// watchGroup is a helper to monitor an errgroup for early exit.
-func watchGroup(g *errgroup.Group) <-chan error {
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- g.Wait()
-	}()
-	return errCh
+	appLogger.Info("Service shutdown complete.")
 }
