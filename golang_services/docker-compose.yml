@@ -2,16 +2,16 @@ version: '3.8'
 
 services:
   postgres:
-    image: postgres:15-alpine # Using PostgreSQL 15 on Alpine Linux for a smaller image
+    image: postgres:15-alpine
     container_name: aradsms_postgres_dev
     environment:
       POSTGRES_USER: smsuser
-      POSTGRES_PASSWORD: smspassword # Use a more secure password in real dev, consider .env file
+      POSTGRES_PASSWORD: smspassword
       POSTGRES_DB: sms_gateway_db
     ports:
-      - "5432:5432" # Expose PostgreSQL on the host machine's port 5432
+      - "5432:5432"
     volumes:
-      - postgres_data:/var/lib/postgresql/data # Persist PostgreSQL data
+      - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U smsuser -d sms_gateway_db"]
@@ -20,61 +20,222 @@ services:
       retries: 5
 
   nats:
-    image: nats:2.9-alpine # Using NATS 2.9 on Alpine
+    image: nats:2.9-alpine
     container_name: aradsms_nats_dev
     ports:
-      - "4222:4222"  # NATS client port
-      - "8222:8222"  # HTTP monitoring port
-      - "6222:6222"  # Routing port for clustering (optional for local dev)
-    command: "-js"   # Start NATS server with JetStream enabled
+      - "4222:4222"
+      - "8222:8222"
+      - "6222:6222"
+    command: "-js"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "nats server check"] # Basic check, nats-server-healthcheck is better if available in image
+      test: ["CMD-SHELL", "nats server check"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Placeholder for a Go service, e.g., user_service
-  # user_service:
-  #   build:
-  #     context: . # Assuming Dockerfile is in golang_services/ or specific service dir
-  #     dockerfile: cmd/user_service/Dockerfile # Path to the Dockerfile for the service
-  #   container_name: aradsms_user_service_dev
-  #   ports:
-  //  # - "8080:8080" # Example port mapping if it's an HTTP service
-  #   environment:
-  #     - APP_LOG_LEVEL=debug
-  #     - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
-  #     - APP_NATS_URL=nats://nats:4222
-  #     # Add other necessary environment variables
-  #   depends_on:
-  //  # - postgres
-  //  # - nats
-  #   restart: unless-stopped
-  #   networks: # Add network if you define a custom one
-  #     - aradsms_net
-  #   volumes:
-  #     # For live reload in development, mount the source code
-  #     # This is optional and depends on your Go development workflow (e.g., using Air for live reload)
-  //   # - ./cmd/user_service:/app/cmd/user_service
-  //   # - ./internal/user_service:/app/internal/user_service
-  //   # - ./internal/platform:/app/internal/platform
-  //   # - ./go.mod:/app/go.mod
-  //   # - ./go.sum:/app/go.sum
+  # Grafana
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: aradsms_grafana_dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./configs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      # - ./configs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards # For later
+    restart: unless-stopped
+    depends_on:
+      - loki
 
-volumes:
-  postgres_data: # Defines a named volume for persisting PostgreSQL data
+  # Loki - Log Aggregation
+  loki:
+    image: grafana/loki:2.9.2
+    container_name: aradsms_loki_dev
+    ports:
+      - "3100:3100"
+      - "9096:9096"
+    volumes:
+      - ./configs/loki/loki-config.yaml:/etc/loki/config.yaml
+      - loki_data:/loki # Persist Loki data using a named volume for /tmp/loki contents
+    command: -config.file=/etc/loki/config.yaml
+    restart: unless-stopped
 
-# Networks can be defined if more complex networking is needed,
-# but Docker Compose creates a default network for all services in this file.
-# networks:
-#   aradsms_net:
-#     driver: bridge
+  # Promtail - Log Shipper
+  promtail:
+    image: grafana/promtail:2.9.2
+    container_name: aradsms_promtail_dev
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./configs/promtail/promtail-config.yaml:/etc/promtail/config.yaml
+      - promtail_positions:/tmp # For positions file (matches promtail config)
+    command: -config.file=/etc/promtail/config.yaml
+    restart: unless-stopped
+    depends_on:
+      - loki
+
+  # --- Arad SMS Go Services ---
+  user_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: user_service
+    container_name: aradsms_user_service_dev
+    environment:
+      - APP_NAME=user_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_USER_SERVICE_GRPC_PORT=50051
+    ports:
+      - "50051:50051"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  phonebook_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: phonebook_service
+    container_name: aradsms_phonebook_service_dev
+    ports:
+      - "50052:50052" # Updated port
+    environment:
+      - APP_NAME=phonebook_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_PHONEBOOK_SERVICE_GRPC_PORT=50052 # Internal port
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  scheduler_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: scheduler_service
+    container_name: aradsms_scheduler_service_dev
+    ports:
+      - "50053:50053" # Updated port
+    environment:
+      - APP_NAME=scheduler_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_SCHEDULER_SERVICE_GRPC_PORT=50053 # Internal port
+      - APP_SCHEDULER_POLLING_INTERVAL=30s
+      - APP_SCHEDULER_JOB_BATCH_SIZE=10
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  billing_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: billing_service
+    container_name: aradsms_billing_service_dev
+    ports:
+      - "8081:8081" # HTTP port for webhooks
+      - "50055:50055" # gRPC port
+    environment:
+      - APP_NAME=billing_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_BILLING_SERVICE_GRPC_PORT=50055
+      - APP_BILLING_SERVICE_HTTP_PORT=8081
+      - APP_USER_SERVICE_GRPC_CLIENT_TARGET=user_service:50051
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      user_service: { condition: service_started }
+    restart: unless-stopped
+
+  public_api_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: public_api_service
+    container_name: aradsms_public_api_service_dev
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_NAME=public_api_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_PUBLIC_API_HTTP_PORT=8080
+      - APP_USER_SERVICE_GRPC_CLIENT_TARGET=user_service:50051
+      - APP_PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET=phonebook_service:50052
+      - APP_SCHEDULER_SERVICE_GRPC_CLIENT_TARGET=scheduler_service:50053
+      - APP_BILLING_SERVICE_GRPC_CLIENT_TARGET=billing_service:50055
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      user_service: { condition: service_started }
+      phonebook_service: { condition: service_started }
+      scheduler_service: { condition: service_started }
+      billing_service: { condition: service_started }
+    restart: unless-stopped
+
+  sms_sending_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: sms_sending_service
+    container_name: aradsms_sms_sending_service_dev
+    environment:
+      - APP_NAME=sms_sending_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_BILLING_SERVICE_GRPC_CLIENT_TARGET=billing_service:50055
+      - APP_SMS_SENDING_SERVICE_DEFAULT_PROVIDER=mock
+      - APP_MAGFA_PROVIDER_API_URL=
+      - APP_MAGFA_PROVIDER_API_KEY=
+      - APP_MAGFA_PROVIDER_SENDER_ID=
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      billing_service: { condition: service_started }
+    restart: unless-stopped
+
+  export_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: export_service
+    container_name: aradsms_export_service_dev
+    environment:
+      - APP_NAME=export_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_EXPORT_SERVICE_EXPORT_PATH=/app/exports
+    volumes:
+      - exports_volume:/app/exports
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
 
   delivery_retrieval_service:
     build:
-      context: . # Root of golang_services
-      dockerfile: Dockerfile.golang # Shared Dockerfile
+      context: .
+      dockerfile: Dockerfile.golang
       args:
         SERVICE_NAME: delivery_retrieval_service
     container_name: aradsms_delivery_retrieval_service_dev
@@ -83,21 +244,15 @@ volumes:
       - APP_LOG_LEVEL=debug
       - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
       - APP_NATS_URL=nats://nats:4222
-      # Add any other specific environment variables needed by delivery_retrieval_service
-      # Example: - DELIVERY_POLLING_INTERVAL=30s
     depends_on:
-      postgres: # Ensure db is ready
-        condition: service_healthy
-      nats:     # Ensure nats is ready
-        condition: service_healthy
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
     restart: unless-stopped
-    # networks: # Uncomment if using a custom network like aradsms_net
-    #   - aradsms_net
 
   inbound_processor_service:
     build:
-      context: . # Root of golang_services
-      dockerfile: Dockerfile.golang # Shared Dockerfile
+      context: .
+      dockerfile: Dockerfile.golang
       args:
         SERVICE_NAME: inbound_processor_service
     container_name: aradsms_inbound_processor_service_dev
@@ -106,69 +261,14 @@ volumes:
       - APP_LOG_LEVEL=debug
       - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
       - APP_NATS_URL=nats://nats:4222
-      # Add any other specific environment variables needed
     depends_on:
-      postgres: # Ensure db is ready
-        condition: service_healthy
-      nats:     # Ensure nats is ready
-        condition: service_healthy
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
     restart: unless-stopped
-    # networks: # Uncomment if using a custom network like aradsms_net
-    #   - aradsms_net
-
-  phonebook_service:
-    build:
-      context: . # Root of golang_services
-      dockerfile: Dockerfile.golang # Shared Dockerfile
-      args:
-        SERVICE_NAME: phonebook_service
-    container_name: aradsms_phonebook_service_dev
-    ports:
-      - "50054:50051" # Expose gRPC port (host:container), container port from APP_GRPC_PORT
-    environment:
-      - APP_NAME=phonebook_service
-      - APP_LOG_LEVEL=debug
-      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
-      - APP_NATS_URL=nats://nats:4222 # Optional for this service, but good for consistency
-      - APP_GRPC_PORT=50051 # Port the gRPC server inside the container will listen on
-      # Add any other specific environment variables needed
-    depends_on:
-      postgres: # Ensure db is ready
-        condition: service_healthy
-      nats:     # Ensure nats is ready (optional, remove if NATS not used by service)
-        condition: service_healthy
-    restart: unless-stopped
-    # networks: # Uncomment if using a custom network like aradsms_net
-    #   - aradsms_net
-
-  scheduler_service:
-    build:
-      context: . # Root of golang_services
-      dockerfile: Dockerfile.golang # Shared Dockerfile
-      args:
-        SERVICE_NAME: scheduler_service
-    container_name: aradsms_scheduler_service_dev
-    environment:
-      - APP_NAME=scheduler_service
-      - APP_LOG_LEVEL=debug
-      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
-      - APP_NATS_URL=nats://nats:4222
-      # Add any other specific environment variables needed, e.g., for cron schedules
-      # Example: - SCHEDULER_CRON_EXPRESSION="*/5 * * * *" # Every 5 minutes
-    depends_on:
-      postgres: # Ensure db is ready
-        condition: service_healthy
-      nats:     # Ensure nats is ready
-        condition: service_healthy
-    restart: unless-stopped
-    # networks: # Uncomment if using a custom network like aradsms_net
-    #   - aradsms_net
 
 volumes:
-  postgres_data: # Defines a named volume for persisting PostgreSQL data
-
-# Networks can be defined if more complex networking is needed,
-# but Docker Compose creates a default network for all services in this file.
-# networks:
-#   aradsms_net:
-#     driver: bridge
+  postgres_data:
+  grafana_data:
+  loki_data:
+  promtail_positions:
+  exports_volume:
