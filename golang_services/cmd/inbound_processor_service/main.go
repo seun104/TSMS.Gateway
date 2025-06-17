@@ -24,7 +24,7 @@ import (
 	"github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/repository/postgres" // Import repository
 
 	// Blank import for promauto metrics registration in app package
-	_ "github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/app"
+	_ "github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/app" // Corrected path
 )
 
 const (

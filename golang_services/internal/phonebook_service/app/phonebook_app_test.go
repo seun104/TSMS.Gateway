@@ -188,6 +188,7 @@ func TestApplication_ListPhonebooks(t *testing.T) {
 	userID := uuid.New()
 
 	t.Run("SuccessWithItems", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil // Reset for sub-test
 		expectedPbs := []*domain.Phonebook{{ID: uuid.New(), UserID: userID, Name: "PB1"}}
 		comps.mockPbRepo.On("ListByUserID", ctx, userID, 0, 10).Return(expectedPbs, nil).Once()
 
@@ -195,12 +196,161 @@ func TestApplication_ListPhonebooks(t *testing.T) {
 
 		require.NoError(t, err)
 		assert.Equal(t, expectedPbs, pbs)
-		assert.Equal(t, int64(len(expectedPbs)), count) // App layer uses len() for count
+		assert.Equal(t, int64(len(expectedPbs)), count)
+		comps.mockPbRepo.AssertExpectations(t)
+	})
+
+	t.Run("SuccessEmptyList", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil // Reset for sub-test
+		comps.mockPbRepo.On("ListByUserID", ctx, userID, 0, 10).Return([]*domain.Phonebook{}, nil).Once()
+
+		pbs, count, err := comps.app.ListPhonebooks(ctx, userID, 0, 10)
+
+		require.NoError(t, err)
+		assert.Empty(t, pbs)
+		assert.Equal(t, int64(0), count)
+		comps.mockPbRepo.AssertExpectations(t)
+	})
+
+	t.Run("RepoError", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil // Reset for sub-test
+		expectedErr := errors.New("repo list error")
+		comps.mockPbRepo.On("ListByUserID", ctx, userID, 0, 10).Return(nil, expectedErr).Once()
+
+		pbs, count, err := comps.app.ListPhonebooks(ctx, userID, 0, 10)
+
+		require.Error(t, err)
+		assert.Nil(t, pbs)
+		assert.Equal(t, int64(0), count)
+		assert.Equal(t, expectedErr, err)
 		comps.mockPbRepo.AssertExpectations(t)
 	})
 }
 
-// --- Contact Method Tests --- (Example for CreateContact)
+func TestApplication_UpdatePhonebook(t *testing.T) {
+	comps := setupPhonebookAppTest(t)
+	ctx := context.Background()
+	pbID := uuid.New()
+	userID := uuid.New()
+	originalName := "Original Name"
+	updatedName := "Updated Name"
+	description := "Description"
+
+	existingPb := &domain.Phonebook{
+		ID:          pbID,
+		UserID:      userID,
+		Name:        originalName,
+		Description: "Old Description",
+		CreatedAt:   time.Now().Add(-time.Hour),
+		UpdatedAt:   time.Now().Add(-time.Hour),
+	}
+
+	t.Run("Success", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil
+		comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockPbRepo.On("GetByID", ctx, pbID, userID).Return(existingPb, nil).Once()
+		comps.mockPbRepo.On("Update", ctx, mock.MatchedBy(func(pb *domain.Phonebook) bool {
+			return pb.ID == pbID && pb.Name == updatedName && pb.Description == description
+		})).Return(nil).Once()
+
+		updatedPb, err := comps.app.UpdatePhonebook(ctx, pbID, userID, updatedName, description)
+
+		require.NoError(t, err)
+		require.NotNil(t, updatedPb)
+		assert.Equal(t, updatedName, updatedPb.Name)
+		assert.Equal(t, description, updatedPb.Description)
+		comps.mockPbRepo.AssertExpectations(t)
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil
+		comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockPbRepo.On("GetByID", ctx, pbID, userID).Return(nil, domain.ErrPhonebookNotFound).Once()
+
+		_, err := comps.app.UpdatePhonebook(ctx, pbID, userID, updatedName, description)
+
+		require.ErrorIs(t, err, domain.ErrPhonebookNotFound)
+		comps.mockPbRepo.AssertExpectations(t)
+		comps.mockPbRepo.AssertNotCalled(t, "Update", mock.Anything, mock.Anything)
+	})
+
+	t.Run("RepoErrorOnGet", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil
+		comps.mockCtRepo.ExpectedCalls = nil
+		expectedErr := errors.New("repo get error")
+		comps.mockPbRepo.On("GetByID", ctx, pbID, userID).Return(nil, expectedErr).Once()
+
+		_, err := comps.app.UpdatePhonebook(ctx, pbID, userID, updatedName, description)
+
+		require.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+		comps.mockPbRepo.AssertExpectations(t)
+	})
+
+	t.Run("RepoErrorOnUpdate", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil
+		comps.mockCtRepo.ExpectedCalls = nil
+		expectedErr := errors.New("repo update error")
+		comps.mockPbRepo.On("GetByID", ctx, pbID, userID).Return(existingPb, nil).Once()
+		comps.mockPbRepo.On("Update", ctx, mock.AnythingOfType("*domain.Phonebook")).Return(expectedErr).Once()
+
+		_, err := comps.app.UpdatePhonebook(ctx, pbID, userID, updatedName, description)
+
+		require.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+		comps.mockPbRepo.AssertExpectations(t)
+	})
+}
+
+func TestApplication_DeletePhonebook(t *testing.T) {
+	comps := setupPhonebookAppTest(t)
+	ctx := context.Background()
+	pbID := uuid.New()
+	userID := uuid.New()
+
+	// Note: The current app.DeletePhonebook only calls phonebookRepo.Delete.
+	// It does not call GetByID first, nor does it delete associated contacts.
+	// Tests will reflect this current implementation. If behavior changes, tests need updates.
+
+	t.Run("Success", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil
+		comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockPbRepo.On("Delete", ctx, pbID, userID).Return(nil).Once()
+		// If app.DeletePhonebook were to also delete contacts:
+		// comps.mockCtRepo.On("DeleteByPhonebookID", ctx, pbID).Return(nil).Once()
+
+
+		err := comps.app.DeletePhonebook(ctx, pbID, userID)
+		require.NoError(t, err)
+		comps.mockPbRepo.AssertExpectations(t)
+		// comps.mockCtRepo.AssertExpectations(t) // If contacts were deleted
+	})
+
+	t.Run("NotFoundOrAuthError", func(t *testing.T) { // Repo Delete might return ErrPhonebookNotFound if GORM hook or similar used for auth
+		comps.mockPbRepo.ExpectedCalls = nil
+		comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockPbRepo.On("Delete", ctx, pbID, userID).Return(domain.ErrPhonebookNotFound).Once()
+
+		err := comps.app.DeletePhonebook(ctx, pbID, userID)
+		require.ErrorIs(t, err, domain.ErrPhonebookNotFound)
+		comps.mockPbRepo.AssertExpectations(t)
+	})
+
+	t.Run("RepoErrorOnDelete", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil
+		comps.mockCtRepo.ExpectedCalls = nil
+		expectedErr := errors.New("repo delete error")
+		comps.mockPbRepo.On("Delete", ctx, pbID, userID).Return(expectedErr).Once()
+
+		err := comps.app.DeletePhonebook(ctx, pbID, userID)
+		require.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+		comps.mockPbRepo.AssertExpectations(t)
+	})
+}
+
+
+// --- Contact Method Tests ---
 
 func TestApplication_CreateContact(t *testing.T) {
 	comps := setupPhonebookAppTest(t)
@@ -234,18 +384,178 @@ func TestApplication_CreateContact(t *testing.T) {
 	})
 }
 
-// Add more tests for other Phonebook and Contact methods (Update, Delete, List, GetContact, FindContactByNumberInPhonebook)
-// following similar patterns.
-// For Update methods, remember to mock GetByID first, then Update.
-// For Delete methods, ensure GetByID (for ownership) is mocked if applicable in app logic before Delete.
-// For ListContacts, similar to ListPhonebooks.
-// For FindContactByNumberInPhonebook, test found and not found cases.
-// Remember to reset mock expectations for each sub-test if `comps` is reused across them without re-initialization.
-// Manual reset: comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
-// Or ensure each t.Run uses its own `comps := setupPhonebookAppTest(t)` if state needs to be fully isolated.
-// The current setup creates fresh mocks for each top-level Test function, but sub-tests share `comps`.
-// So, manual reset or specific mock.On().Once() per sub-test is crucial.
-// The .Once() helps manage this for simple cases.
+
+func TestApplication_GetContact(t *testing.T) {
+	comps := setupPhonebookAppTest(t)
+	ctx := context.Background()
+	contactID := uuid.New()
+	pbID := uuid.New()
+
+	t.Run("SuccessFound", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		expectedContact := &domain.Contact{ID: contactID, PhonebookID: pbID, Number: "111"}
+		comps.mockCtRepo.On("GetByID", ctx, contactID, pbID).Return(expectedContact, nil).Once()
+
+		contact, err := comps.app.GetContact(ctx, contactID, pbID)
+		require.NoError(t, err)
+		assert.Equal(t, expectedContact, contact)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockCtRepo.On("GetByID", ctx, contactID, pbID).Return(nil, domain.ErrContactNotFound).Once()
+		contact, err := comps.app.GetContact(ctx, contactID, pbID)
+		require.ErrorIs(t, err, domain.ErrContactNotFound)
+		assert.Nil(t, contact)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+
+	t.Run("RepoError", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		expectedErr := errors.New("repo get error")
+		comps.mockCtRepo.On("GetByID", ctx, contactID, pbID).Return(nil, expectedErr).Once()
+		contact, err := comps.app.GetContact(ctx, contactID, pbID)
+		require.Error(t, err)
+		assert.Equal(t, expectedErr, err)
+		assert.Nil(t, contact)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+}
+
+func TestApplication_ListContacts(t *testing.T) {
+	comps := setupPhonebookAppTest(t)
+	ctx := context.Background()
+	pbID := uuid.New()
+	// Note: The current app.ListContacts does not verify phonebook ownership by userID.
+	// It directly calls contactRepo.ListByPhonebookID.
+	// If ownership check is added to app.ListContacts, these tests would need to mock pbRepo.GetByID as well.
+
+	t.Run("SuccessWithItems", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		expectedContacts := []*domain.Contact{{ID: uuid.New(), PhonebookID: pbID, Number: "222"}}
+		comps.mockCtRepo.On("ListByPhonebookID", ctx, pbID, 0, 10).Return(expectedContacts, nil).Once()
+
+		contacts, count, err := comps.app.ListContacts(ctx, pbID, 0, 10)
+
+		require.NoError(t, err)
+		assert.Equal(t, expectedContacts, contacts)
+		assert.Equal(t, int64(len(expectedContacts)), count)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+
+	t.Run("SuccessEmptyList", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockCtRepo.On("ListByPhonebookID", ctx, pbID, 0, 10).Return([]*domain.Contact{}, nil).Once()
+		contacts, count, err := comps.app.ListContacts(ctx, pbID, 0, 10)
+		require.NoError(t, err)
+		assert.Empty(t, contacts)
+		assert.Equal(t, int64(0), count)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+
+	t.Run("RepoErrorContactList", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		expectedErr := errors.New("repo list contacts error")
+		comps.mockCtRepo.On("ListByPhonebookID", ctx, pbID, 0, 10).Return(nil, expectedErr).Once()
+		contacts, count, err := comps.app.ListContacts(ctx, pbID, 0, 10)
+		require.Error(t, err)
+		assert.Nil(t, contacts)
+		assert.Equal(t, int64(0), count)
+		assert.Equal(t, expectedErr, err)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+}
+
+func TestApplication_UpdateContact(t *testing.T) {
+	comps := setupPhonebookAppTest(t)
+	ctx := context.Background()
+	contactID := uuid.New()
+	pbID := uuid.New()
+	updatedNumber := "9876543210"
+
+	existingContact := &domain.Contact{
+		ID:          contactID,
+		PhonebookID: pbID,
+		Number:      "1234567890",
+		FirstName:   "OldFirst",
+	}
+
+	t.Run("Success", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockCtRepo.On("GetByID", ctx, contactID, pbID).Return(existingContact, nil).Once()
+		comps.mockCtRepo.On("Update", ctx, mock.MatchedBy(func(c *domain.Contact) bool {
+			return c.ID == contactID && c.Number == updatedNumber
+		})).Return(nil).Once()
+
+		updatedContact, err := comps.app.UpdateContact(ctx, contactID, pbID, updatedNumber, "NewFirst", "NewLast", "new@example.com", map[string]string{"custom": "val"}, false)
+
+		require.NoError(t, err)
+		require.NotNil(t, updatedContact)
+		assert.Equal(t, updatedNumber, updatedContact.Number)
+		assert.Equal(t, "NewFirst", updatedContact.FirstName)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockCtRepo.On("GetByID", ctx, contactID, pbID).Return(nil, domain.ErrContactNotFound).Once()
+		_, err := comps.app.UpdateContact(ctx, contactID, pbID, updatedNumber, "", "", "", nil, false)
+		require.ErrorIs(t, err, domain.ErrContactNotFound)
+		comps.mockCtRepo.AssertNotCalled(t, "Update", mock.Anything, mock.Anything)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+}
+
+func TestApplication_DeleteContact(t *testing.T) {
+	comps := setupPhonebookAppTest(t)
+	ctx := context.Background()
+	contactID := uuid.New()
+	pbID := uuid.New()
+	// Note: app.DeleteContact calls repo.Delete directly without a GetByID first.
+
+	t.Run("Success", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockCtRepo.On("Delete", ctx, contactID, pbID).Return(nil).Once()
+		err := comps.app.DeleteContact(ctx, contactID, pbID)
+		require.NoError(t, err)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+
+	t.Run("NotFound", func(t *testing.T) { // Assuming repo.Delete returns ErrContactNotFound
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockCtRepo.On("Delete", ctx, contactID, pbID).Return(domain.ErrContactNotFound).Once()
+		err := comps.app.DeleteContact(ctx, contactID, pbID)
+		require.ErrorIs(t, err, domain.ErrContactNotFound)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+}
+
+func TestApplication_FindContactByNumberInPhonebook(t *testing.T) {
+	comps := setupPhonebookAppTest(t)
+	ctx := context.Background()
+	number := "12345"
+	pbID := uuid.New()
+
+	t.Run("SuccessFound", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		expectedContact := &domain.Contact{ID: uuid.New(), PhonebookID: pbID, Number: number}
+		comps.mockCtRepo.On("FindByNumberInPhonebook", ctx, number, pbID).Return(expectedContact, nil).Once()
+		contact, err := comps.app.FindContactByNumberInPhonebook(ctx, number, pbID)
+		require.NoError(t, err)
+		assert.Equal(t, expectedContact, contact)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+
+	t.Run("NotFound", func(t *testing.T) {
+		comps.mockPbRepo.ExpectedCalls = nil; comps.mockCtRepo.ExpectedCalls = nil
+		comps.mockCtRepo.On("FindByNumberInPhonebook", ctx, number, pbID).Return(nil, domain.ErrContactNotFound).Once()
+		contact, err := comps.app.FindContactByNumberInPhonebook(ctx, number, pbID)
+		require.ErrorIs(t, err, domain.ErrContactNotFound)
+		assert.Nil(t, contact)
+		comps.mockCtRepo.AssertExpectations(t)
+	})
+}
 ```
 
 Now, I also need to provide the diff to correct the import paths in `phonebook_app.go`.
