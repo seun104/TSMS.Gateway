@@ -484,4 +484,285 @@ func TestBillingService_DeductCreditForSMS_Success(t *testing.T) {
 // - userRepo.Update (gRPC to user-service) fails
 // - transactionRepo.Create fails
 // - DB transaction commit fails (mockDbPool.BeginFunc returns error on its own)
+
+func TestBillingAppService_HandlePaymentWebhook_NewScenarios(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("PaymentIntentNotFound", func(t *testing.T) {
+		comps := setupBillingAppTest(t)
+		gatewayPIID := "gw_pi_" + uuid.New().String()
+		webhookPayload := []byte(`{}`)
+		signature := "sig"
+
+		eventFromAdapter := &domain.PaymentGatewayEvent{
+			GatewayPaymentIntentID: gatewayPIID,
+			Type:                   string(domain.PaymentIntentStatusSucceeded),
+			AmountReceived:         1000,
+		}
+		comps.mockGateway.On("HandleWebhookEvent", ctx, webhookPayload, signature).Return(eventFromAdapter, nil).Once()
+
+		comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+			Run(func(args mock.Arguments) {
+				fn := args.Get(1).(func(pgx.Tx) error)
+				// Simulate the error path within the transaction
+				comps.mockPIntentRepo.On("GetByGatewayPaymentIntentID", mock.Anything, mock.Anything, gatewayPIID).Return(nil, pgx.ErrNoRows).Once()
+				err := fn(nil) // Call the function passed to BeginFunc
+				assert.Error(t, err)
+				assert.ErrorIs(t, err, pgx.ErrNoRows) // Check that the specific error is returned by fn
+			}).Return(pgx.ErrNoRows).Once() // Ensure BeginFunc itself returns the error from fn
+
+		err := comps.service.HandlePaymentWebhook(ctx, webhookPayload, signature)
+
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, pgx.ErrNoRows, "Expected error to wrap pgx.ErrNoRows")
+
+		comps.mockGateway.AssertExpectations(t)
+		comps.mockPIntentRepo.AssertExpectations(t)
+		comps.mockUserRepo.AssertNotCalled(t, "GetByID", mock.Anything, mock.Anything)
+		comps.mockTxnRepo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+		comps.mockDbPool.AssertExpectations(t)
+	})
+
+	t.Run("UserNotFoundForCreditUpdateOnSucceededEvent", func(t *testing.T) {
+		comps := setupBillingAppTest(t)
+		gatewayPIID := "gw_pi_" + uuid.New().String()
+		userID := uuid.New()
+		amount := int64(2000)
+		webhookPayload := []byte(`{}`)
+		signature := "sig"
+
+		eventFromAdapter := &domain.PaymentGatewayEvent{
+			GatewayPaymentIntentID: gatewayPIID,
+			Type:                   string(domain.PaymentIntentStatusSucceeded),
+			AmountReceived:         amount,
+		}
+		comps.mockGateway.On("HandleWebhookEvent", ctx, webhookPayload, signature).Return(eventFromAdapter, nil).Once()
+
+		paymentIntentFromDB := &domain.PaymentIntent{ID: uuid.New(), UserID: userID, Amount: amount, Status: domain.PaymentIntentStatusRequiresAction, GatewayPaymentIntentID: &gatewayPIID}
+
+		userNotFoundError := errors.New("user not found in repo")
+
+		comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+			Run(func(args mock.Arguments) {
+				fn := args.Get(1).(func(pgx.Tx) error)
+				// Setup mocks for calls inside the transaction
+				comps.mockPIntentRepo.On("GetByGatewayPaymentIntentID", mock.Anything, mock.Anything, gatewayPIID).Return(paymentIntentFromDB, nil).Once()
+				comps.mockUserRepo.On("GetByID", mock.Anything, mock.Anything, userID.String()).Return(nil, userNotFoundError).Once()
+				// Expect payment intent update to processing_error or similar
+				comps.mockPIntentRepo.On("Update", mock.Anything, mock.Anything, mock.MatchedBy(func(pi *domain.PaymentIntent) bool {
+					return pi.ID == paymentIntentFromDB.ID && pi.Status == domain.PaymentIntentStatusProcessingError
+				})).Return(nil).Once()
+
+
+				err := fn(nil) // Call the function passed to BeginFunc
+				assert.Error(t, err)
+				assert.ErrorIs(t, err, userNotFoundError)
+			}).Return(userNotFoundError).Once()
+
+
+		err := comps.service.HandlePaymentWebhook(ctx, webhookPayload, signature)
+
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, userNotFoundError)
+
+		comps.mockGateway.AssertExpectations(t)
+		comps.mockPIntentRepo.AssertExpectations(t)
+		comps.mockUserRepo.AssertExpectations(t)
+		comps.mockTxnRepo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+		comps.mockDbPool.AssertExpectations(t)
+	})
+
+	t.Run("PaymentIntentAlreadySucceededIdempotency", func(t *testing.T) {
+		comps := setupBillingAppTest(t)
+		gatewayPIID := "gw_pi_" + uuid.New().String()
+		webhookPayload := []byte(`{}`)
+		signature := "sig"
+
+		eventFromAdapter := &domain.PaymentGatewayEvent{
+			GatewayPaymentIntentID: gatewayPIID,
+			Type:                   string(domain.PaymentIntentStatusSucceeded),
+		}
+		comps.mockGateway.On("HandleWebhookEvent", ctx, webhookPayload, signature).Return(eventFromAdapter, nil).Once()
+
+		paymentIntentFromDB := &domain.PaymentIntent{ID: uuid.New(), Status: domain.PaymentIntentStatusSucceeded, GatewayPaymentIntentID: &gatewayPIID}
+
+		comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+			Run(func(args mock.Arguments) {
+				fn := args.Get(1).(func(pgx.Tx) error)
+				comps.mockPIntentRepo.On("GetByGatewayPaymentIntentID", mock.Anything, mock.Anything, gatewayPIID).Return(paymentIntentFromDB, nil).Once()
+				err := fn(nil)
+				assert.NoError(t, err) // Idempotent case should not error out inside transaction
+			}).Return(nil).Once()
+
+
+		err := comps.service.HandlePaymentWebhook(ctx, webhookPayload, signature)
+
+		assert.NoError(t, err, "Idempotent successful webhook should not return an error")
+
+		comps.mockGateway.AssertExpectations(t)
+		comps.mockPIntentRepo.AssertExpectations(t)
+		comps.mockUserRepo.AssertNotCalled(t, "GetByID", mock.Anything, mock.Anything)
+		comps.mockUserRepo.AssertNotCalled(t, "UpdateCreditBalance", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		comps.mockTxnRepo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+		comps.mockDbPool.AssertExpectations(t)
+	})
+
+	t.Run("HandlePaymentIntentPaymentFailedEvent", func(t *testing.T) {
+		comps := setupBillingAppTest(t)
+		gatewayPIID := "gw_pi_" + uuid.New().String()
+		userID := uuid.New()
+		webhookPayload := []byte(`{}`)
+		signature := "sig"
+
+		eventFromAdapter := &domain.PaymentGatewayEvent{
+			GatewayPaymentIntentID: gatewayPIID,
+			Type:                   string(domain.PaymentIntentStatusFailed), // Failed event
+		}
+		comps.mockGateway.On("HandleWebhookEvent", ctx, webhookPayload, signature).Return(eventFromAdapter, nil).Once()
+
+		paymentIntentFromDB := &domain.PaymentIntent{ID: uuid.New(), UserID: userID, Status: domain.PaymentIntentStatusRequiresAction, GatewayPaymentIntentID: &gatewayPIID}
+
+		comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+			Run(func(args mock.Arguments) {
+				fn := args.Get(1).(func(pgx.Tx) error)
+				comps.mockPIntentRepo.On("GetByGatewayPaymentIntentID", mock.Anything, mock.Anything, gatewayPIID).Return(paymentIntentFromDB, nil).Once()
+				comps.mockPIntentRepo.On("Update", mock.Anything, mock.Anything, mock.MatchedBy(func(pi *domain.PaymentIntent) bool {
+					return pi.ID == paymentIntentFromDB.ID && pi.Status == domain.PaymentIntentStatusFailed
+				})).Return(nil).Once()
+				err := fn(nil)
+				assert.NoError(t, err)
+			}).Return(nil).Once()
+
+
+		err := comps.service.HandlePaymentWebhook(ctx, webhookPayload, signature)
+
+		assert.NoError(t, err)
+
+		comps.mockGateway.AssertExpectations(t)
+		comps.mockPIntentRepo.AssertExpectations(t)
+		comps.mockUserRepo.AssertNotCalled(t, "GetByID", mock.Anything, mock.Anything)
+		comps.mockUserRepo.AssertNotCalled(t, "UpdateCreditBalance", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		comps.mockTxnRepo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+		comps.mockDbPool.AssertExpectations(t)
+	})
+}
+
+func TestBillingAppService_DeductCreditForSMS_NewScenarios(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	numMessages := 1
+	transactionDetails := domain.TransactionDetails{Description: "Test SMS Charge", ReferenceID: "sms_ref_123"}
+
+
+	t.Run("InsufficientCredit", func(t *testing.T) {
+		comps := setupBillingAppTest(t)
+		cost := int64(150)
+		userCredit := 100.0 // Less than cost
+
+		// Mock CalculateSMSCost to return a specific cost
+		// To do this properly, we'd need to mock GetActiveUserTariff or GetDefaultActiveTariff
+		// For simplicity here, let's assume CalculateSMSCost is called and returns a value.
+		// However, the current service calls CalculateSMSCost internally, so we mock its dependencies.
+		mockTariff := &domain.Tariff{PricePerSMS: 150, Currency: "USD"} // Cost is 150
+		comps.mockTariffRepo.On("GetActiveUserTariff", ctx, userID).Return(mockTariff, nil).Once()
+		// If GetActiveUserTariff fails or returns nil, GetDefaultActiveTariff would be called.
+		// comps.mockTariffRepo.On("GetDefaultActiveTariff", ctx).Return(mockTariff, nil).Maybe()
+
+
+		mockUser := &userDomain.User{ID: userID.String(), CreditBalance: userCredit, CurrencyCode: "USD"}
+
+		// Mock BeginFunc to simulate the transaction
+		comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+			Run(func(args mock.Arguments) {
+				fn := args.Get(1).(func(pgx.Tx) error)
+				// Setup mocks for calls inside the transaction
+				comps.mockUserRepo.On("GetByID", mock.Anything, mock.Anything, userID.String()).Return(mockUser, nil).Once()
+				// CalculateSMSCost dependencies are mocked above and will be called inside fn
+
+				err := fn(nil) // Call the function passed to BeginFunc
+				assert.Error(t, err)
+				assert.ErrorIs(t, err, ErrInsufficientCredit)
+			}).Return(ErrInsufficientCredit).Once() // Ensure BeginFunc itself returns the error
+
+		_, err := comps.service.DeductCreditForSMS(ctx, userID, numMessages, transactionDetails)
+
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, ErrInsufficientCredit)
+
+		comps.mockTariffRepo.AssertExpectations(t)
+		comps.mockUserRepo.AssertExpectations(t) // GetByID was called
+		comps.mockUserRepo.AssertNotCalled(t, "UpdateCreditBalance", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		comps.mockTxnRepo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+		comps.mockDbPool.AssertExpectations(t)
+	})
+
+	t.Run("UserServiceErrorOnCreditUpdate", func(t *testing.T) {
+		comps := setupBillingAppTest(t)
+		cost := int64(50)
+		userCredit := 200.0
+
+		mockTariff := &domain.Tariff{PricePerSMS: 50, Currency: "USD"}
+		comps.mockTariffRepo.On("GetActiveUserTariff", ctx, userID).Return(mockTariff, nil).Once()
+
+		mockUser := &userDomain.User{ID: userID.String(), CreditBalance: userCredit, CurrencyCode: "USD"}
+		userServiceError := errors.New("user service update failed")
+
+		comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+			Run(func(args mock.Arguments) {
+				fn := args.Get(1).(func(pgx.Tx) error)
+				comps.mockUserRepo.On("GetByID", mock.Anything, mock.Anything, userID.String()).Return(mockUser, nil).Once()
+				comps.mockUserRepo.On("UpdateCreditBalance", mock.Anything, mock.Anything, userID.String(), userCredit-float64(cost)).Return(userServiceError).Once()
+
+				err := fn(nil)
+				assert.Error(t, err)
+				assert.ErrorIs(t, err, userServiceError)
+			}).Return(userServiceError).Once()
+
+
+		_, err := comps.service.DeductCreditForSMS(ctx, userID, numMessages, transactionDetails)
+
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, userServiceError)
+
+		comps.mockTariffRepo.AssertExpectations(t)
+		comps.mockUserRepo.AssertExpectations(t) // GetByID and UpdateCreditBalance called
+		comps.mockTxnRepo.AssertNotCalled(t, "Create", mock.Anything, mock.Anything, mock.Anything)
+		comps.mockDbPool.AssertExpectations(t) // Assert BeginFunc was called
+	})
+
+	t.Run("TransactionCreationFails", func(t *testing.T) {
+		comps := setupBillingAppTest(t)
+		cost := int64(50)
+		userCredit := 200.0
+
+		mockTariff := &domain.Tariff{PricePerSMS: 50, Currency: "USD"}
+		comps.mockTariffRepo.On("GetActiveUserTariff", ctx, userID).Return(mockTariff, nil).Once()
+
+		mockUser := &userDomain.User{ID: userID.String(), CreditBalance: userCredit, CurrencyCode: "USD"}
+		txnCreationError := errors.New("transaction repo create failed")
+
+		comps.mockDbPool.On("BeginFunc", mock.Anything, mock.AnythingOfType("func(pgx.Tx) error")).
+			Run(func(args mock.Arguments) {
+				fn := args.Get(1).(func(pgx.Tx) error)
+				comps.mockUserRepo.On("GetByID", mock.Anything, mock.Anything, userID.String()).Return(mockUser, nil).Once()
+				comps.mockUserRepo.On("UpdateCreditBalance", mock.Anything, mock.Anything, userID.String(), userCredit-float64(cost)).Return(nil).Once()
+				comps.mockTxnRepo.On("Create", mock.Anything, mock.Anything, mock.AnythingOfType("*domain.Transaction")).Return(nil, txnCreationError).Once()
+
+				err := fn(nil)
+				assert.Error(t, err)
+				assert.ErrorIs(t, err, txnCreationError)
+			}).Return(txnCreationError).Once()
+
+
+		_, err := comps.service.DeductCreditForSMS(ctx, userID, numMessages, transactionDetails)
+
+		assert.Error(t, err)
+		assert.ErrorIs(t, err, txnCreationError)
+
+		comps.mockTariffRepo.AssertExpectations(t)
+		comps.mockUserRepo.AssertExpectations(t)
+		comps.mockTxnRepo.AssertExpectations(t)
+		comps.mockDbPool.AssertExpectations(t)
+	})
+}
 ```

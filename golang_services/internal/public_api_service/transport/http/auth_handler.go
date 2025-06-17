@@ -6,12 +6,12 @@ import (
 	"log/slog"
 	"net/http"
     "io"
+	"strings" // For error checking in placeholder logic
 
-
-	"github.com/aradsms/golang_services/api/proto/userservice" // Adjust to your go.mod path
-	"github.com/aradsms/golang_services/internal/public_api_service/adapters/grpc_clients"
-	"github.com/aradsms/golang_services/internal/public_api_service/middleware"
-    // "github.com/go-playground/validator/v10" // For request validation
+	"github.com/AradIT/aradsms/golang_services/api/proto/userservice" // Corrected path
+	"github.com/AradIT/aradsms/golang_services/internal/public_api_service/adapters/grpc_clients"
+	"github.com/AradIT/aradsms/golang_services/internal/public_api_service/middleware"
+    "github.com/go-playground/validator/v10" // For request validation
     "github.com/go-chi/chi/v5" // Added for RegisterRoutes type hint
 )
 
@@ -19,7 +19,7 @@ import (
 type AuthHandler struct {
 	userServiceClient *grpc_clients.UserServiceClient
 	logger            *slog.Logger
-	// validate          *validator.Validate // For request validation
+	validate          *validator.Validate // For request validation
 }
 
 // NewAuthHandler creates a new AuthHandler.
@@ -27,7 +27,7 @@ func NewAuthHandler(userServiceClient *grpc_clients.UserServiceClient, logger *s
 	return &AuthHandler{
 		userServiceClient: userServiceClient,
 		logger:            logger.With("handler", "auth"),
-		// validate:          validator.New(validator.WithRequiredStructEnabled()),
+		validate:          validator.New(validator.WithRequiredStructEnabled()),
 	}
 }
 
@@ -50,19 +50,19 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
         if errors.Is(err, io.EOF) {
 			logger.WarnContext(ctx, "Empty request body for registration")
-            h.jsonError(w, "Request body is empty", http.StatusBadRequest)
+            h.jsonError(w, logger, "Request body is empty", http.StatusBadRequest) // Pass logger
             return
         }
 		logger.ErrorContext(ctx, "Failed to decode registration request", "error", err)
-		h.jsonError(w, "Invalid request payload: "+err.Error(), http.StatusBadRequest)
+		h.jsonError(w, logger, "Invalid request payload: "+err.Error(), http.StatusBadRequest) // Pass logger
 		return
 	}
-    // TODO: Add request validation using 'validate' tag on RegisterRequest struct
-    // if err := h.validate.Struct(req); err != nil {
-	//     logger.WarnContext(ctx, "Registration validation failed", "error", err, "request", req)
-    //     h.jsonError(w, "Validation failed: "+err.Error(), http.StatusBadRequest)
-    //     return
-    // }
+
+	if err := h.validate.StructCtx(ctx, req); err != nil {
+		logger.WarnContext(ctx, "Registration request validation failed", "error", err)
+		h.jsonError(w, logger, "Validation failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
     logger.InfoContext(ctx, "Registration attempt received", "username", req.Username, "email", req.Email)
     // Placeholder: Simulate call to a hypothetical RegisterUser RPC
@@ -92,14 +92,14 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
     // The actual call would be to h.userServiceClient which needs a Register method.
     // For the sake of progress on this handler, we'll assume such a method exists.
     // This will be a non-functional placeholder for the RPC call.
+    // SimulateRegister and other Simulate methods would ideally use the passed-in logger for context.
+    // For now, assuming they use their own or this is handled internally.
     _, err := h.userServiceClient.SimulateRegister(r.Context(), req.Username, req.Email, req.Password, req.FirstName, req.LastName, req.PhoneNumber)
     if err != nil {
-        // Map gRPC errors to HTTP errors
-        // e.g. if status.Code(err) == codes.AlreadyExists
-        if strings.Contains(err.Error(), "exists") { // Basic error check
-             h.jsonError(w, err.Error(), http.StatusConflict)
+        if strings.Contains(err.Error(), "exists") {
+             h.jsonError(w, logger, err.Error(), http.StatusConflict) // Pass logger
         } else {
-             h.jsonError(w, "Registration failed: "+err.Error(), http.StatusInternalServerError)
+             h.jsonError(w, logger, "Registration failed: "+err.Error(), http.StatusInternalServerError) // Pass logger
         }
         return
     }
@@ -110,12 +110,22 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *AuthHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context() // Get context for logger and validation
+	requestID := chi_middleware.GetReqID(ctx)
+	logger := h.logger.With("request_id", requestID) // Create handler-specific logger with request_id
+
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.jsonError(w, "Invalid request payload", http.StatusBadRequest)
+		logger.ErrorContext(ctx, "Failed to decode login request", "error", err)
+		h.jsonError(w, logger, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
-    // TODO: Add request validation
+
+	if err := h.validate.StructCtx(ctx, req); err != nil {
+		logger.WarnContext(ctx, "Login request validation failed", "error", err)
+		h.jsonError(w, logger, "Validation failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// This will call user_service Login (which needs to be exposed via gRPC)
     // For now, user_service.AuthServiceInternal does not have a Login RPC.
@@ -166,7 +176,12 @@ func (h *AuthHandler) handleRefreshToken(w http.ResponseWriter, r *http.Request)
 		h.jsonError(w, logger, "Invalid request payload", http.StatusBadRequest)
 		return
 	}
-    // TODO: Add request validation
+
+	if err := h.validate.StructCtx(ctx, req); err != nil {
+		logger.WarnContext(ctx, "Refresh token request validation failed", "error", err)
+		h.jsonError(w, logger, "Validation failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
     logger.InfoContext(ctx, "Refresh token attempt received")
     // Placeholder for calling a RefreshToken RPC on UserServiceClient
@@ -193,12 +208,14 @@ func (h *AuthHandler) handleRefreshToken(w http.ResponseWriter, r *http.Request)
 
 
 // jsonError is a helper to write JSON error responses.
-// It now accepts a logger to ensure the request_id is logged with the error.
+// It now accepts a logger to ensure the request_id (if present in logger) is logged with the error.
+// It uses GenericErrorResponse from the same package (dto.go).
 func (h *AuthHandler) jsonError(w http.ResponseWriter, logger *slog.Logger, message string, statusCode int) {
-	logger.WarnContext(context.Background(), "API Error Response", "status_code", statusCode, "message", message) // Use context from request if available
+	// The logger instance passed in should already have request_id if set by the handler.
+	logger.Warn("API Error Response", "status_code", statusCode, "message", message)
     w.Header().Set("Content-Type", "application/json")
     w.WriteHeader(statusCode)
-    json.NewEncoder(w).Encode(GenericErrorResponse{Error: message})
+    json.NewEncoder(w).Encode(GenericErrorResponse{Error: message}) // Uses dto.GenericErrorResponse from the same package
 }
 
 // --- Add these to UserServiceClient in adapters/grpc_clients/user_service_client.go ---

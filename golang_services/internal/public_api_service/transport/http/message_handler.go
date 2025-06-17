@@ -8,20 +8,21 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/aradsms/golang_services/internal/core_sms/domain"
-	"github.com/aradsms/golang_services/internal/platform/messagebroker"
-	outboxRepoIface "github.com/aradsms/golang_services/internal/sms_sending_service/repository"
-	"github.com/aradsms/golang_services/internal/public_api_service/middleware"
+	"github.com/AradIT/aradsms/golang_services/internal/core_sms/domain"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker"
+	outboxRepoIface "github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/repository"
+	"github.com/AradIT/aradsms/golang_services/internal/public_api_service/middleware"
 	"github.com/go-chi/chi/v5"
 	chi_middleware "github.com/go-chi/chi/v5/middleware" // For GetReqID
+	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // SendMessageRequest DTO for POST /messages/send
 type SendMessageRequest struct {
-	SenderID  string  `json:"sender_id" validate:"required"`
-	Recipient string  `json:"recipient" validate:"required"` // TODO: Add phone number validation
+	SenderID  string  `json:"sender_id" validate:"required,min=1,max=15"`
+	Recipient string  `json:"recipient" validate:"required,min=7,max=20"`
 	Content   string  `json:"content" validate:"required,min=1"`
 	UserData  *string `json:"user_data,omitempty"`
 }
@@ -61,6 +62,7 @@ type MessageHandler struct {
 	outboxRepo outboxRepoIface.OutboxRepository
 	dbPool     *pgxpool.Pool
 	logger     *slog.Logger
+	validate   *validator.Validate
 }
 
 func NewMessageHandler(
@@ -74,6 +76,7 @@ func NewMessageHandler(
 		outboxRepo: outboxRepo,
 		dbPool:     dbPool,
 		logger:     logger.With("handler", "message"),
+		validate:   validator.New(validator.WithRequiredStructEnabled()),
 	}
 }
 
@@ -103,7 +106,12 @@ func (h *MessageHandler) handleSendMessage(w http.ResponseWriter, r *http.Reques
 		h.jsonError(w, logger, "Invalid request payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// TODO: Add validation for req struct using h.validate
+
+	if err := h.validate.StructCtx(ctx, req); err != nil {
+		logger.WarnContext(ctx, "Send message request validation failed", "error", err)
+		h.jsonError(w, logger, "Validation failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	outboxMessageID := uuid.NewString()
 	now := time.Now()
@@ -209,15 +217,14 @@ func (h *MessageHandler) handleGetMessageStatus(w http.ResponseWriter, r *http.R
 	json.NewEncoder(w).Encode(response)
 }
 
-// jsonError helper (already defined or shared) - needs to accept logger
+// jsonError helper
 func (h *MessageHandler) jsonError(w http.ResponseWriter, logger *slog.Logger, message string, statusCode int) {
-	logger.WarnContext(context.Background(), "API Error Response", "status_code", statusCode, "message", message) // Use a background context if request context might be cancelled
+	// The logger instance passed in should already have request_id if set by the handler.
+	logger.Warn("API Error Response", "status_code", statusCode, "message", message)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
-	json.NewEncoder(w).Encode(GenericErrorResponse{Error: message}) // GenericErrorResponse needs to be defined or use map
+	// Assumes GenericErrorResponse is available from the package (dto.go)
+	json.NewEncoder(w).Encode(GenericErrorResponse{Error: message})
 }
 
-// GenericErrorResponse can be defined in a shared DTOs file or locally if not already.
-type GenericErrorResponse struct {
-	Error string `json:"error"`
-}
+// Removed local GenericErrorResponse, will use the one from dto.go (same package)

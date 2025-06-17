@@ -1,6 +1,6 @@
 # Makefile for Arad SMS Gateway Go Services
 
-.PHONY: all build test run lint clean help
+.PHONY: all build test run lint clean help vulncheck
 
 # Variables
 DOCKER_COMPOSE_FILE := docker-compose.yml
@@ -97,6 +97,12 @@ lint:
 	@echo "Linting code..."
 	$(GO_LINT_CMD) run $(GO_PACKAGES)
 
+# Vulnerability check
+# Ensure govulncheck is installed: go install golang.org/x/vuln/cmd/govulncheck@latest
+vulncheck:
+	@echo "Running govulncheck to scan for vulnerabilities..."
+	govulncheck ./...
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -111,6 +117,7 @@ help:
 	@echo "  stop       - Stop all services started with Docker Compose"
 	@echo "  test       - Run unit tests for all Go services"
 	@echo "  lint       - Lint all Go service code"
+	@echo "  vulncheck  - Scan for vulnerabilities using govulncheck"
 	@echo "  clean      - Remove build artifacts"
 	@echo "  help       - Show this help message"
 	@echo ""

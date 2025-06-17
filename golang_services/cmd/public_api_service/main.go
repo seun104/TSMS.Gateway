@@ -12,27 +12,30 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aradsms/golang_services/internal/platform/config"
-	"github.com/aradsms/golang_services/internal/platform/database" // For dbPool
-	"github.com/aradsms/golang_services/internal/platform/logger"
-	"github.com/aradsms/golang_services/internal/platform/messagebroker"
-	"github.com/aradsms/golang_services/internal/public_api_service/adapters/grpc_clients"
-	"github.com/aradsms/golang_services/internal/public_api_service/middleware"
-	httptransport "github.com/aradsms/golang_services/internal/public_api_service/transport/http" // Alias for clarity if needed elsewhere
-	incomingHttp "github.com/aradsms/golang_services/internal/public_api_service/transport/http" // Specific alias for incoming handler
+	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/database" // For dbPool
+	"github.com/AradIT/aradsms/golang_services/internal/platform/logger"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker"
+	"github.com/AradIT/aradsms/golang_services/internal/public_api_service/adapters/grpc_clients"
+	"github.com/AradIT/aradsms/golang_services/internal/public_api_service/middleware"
+	httptransport "github.com/AradIT/aradsms/golang_services/internal/public_api_service/transport/http" // Alias for clarity if needed elsewhere
+	apphttp "github.com/AradIT/aradsms/golang_services/internal/public_api_service/transport/http" // Specific alias for http handlers + metrics
 
 	// Import for OutboxRepository implementation
-	outboxRepoImpl "github.com/aradsms/golang_services/internal/sms_sending_service/repository/postgres"
-	phonebookPb "github.com/aradsms/golang_services/api/proto/phonebookservice"     // Phonebook gRPC client
-	schedulerClientAdapter "github.com/AradIT/Arad.SMS.Gateway/golang_services/internal/public_api_service/adapters/grpc_clients" // Scheduler gRPC client adapter
-
+	outboxRepoImpl "github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/repository/postgres"
+	phonebookPb "github.com/AradIT/aradsms/golang_services/api/proto/phonebookservice"     // Phonebook gRPC client
+	schedulerClientAdapter "github.com/AradIT/aradsms/golang_services/internal/public_api_service/adapters/grpc_clients" // Scheduler gRPC client adapter
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-playground/validator/v10" // Import validator
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus/promhttp" // For promhttp.Handler()
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	// Blank import for Prometheus metrics registration if using promauto in metrics_middleware
+	_ "github.com/AradIT/aradsms/golang_services/internal/public_api_service/transport/http"
 )
 
 const serviceName = "public_api_service"
@@ -114,29 +117,35 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(chimiddleware.RequestID)
 	r.Use(chimiddleware.RealIP)
+	r.Use(chimiddleware.Logger)    // Example: add basic request logging
 	r.Use(chimiddleware.Recoverer)
 	r.Use(chimiddleware.Timeout(60 * time.Second))
+	// Add Prometheus Metrics Middleware
+	r.Use(apphttp.PrometheusMetricsMiddleware)
+
 
 	authMW := middleware.AuthMiddleware(userSvcClient, appLogger)
 
     // Initialize Repositories needed by handlers in this service
-    outboxRepo := outboxRepoImpl.NewPgOutboxRepository() // Instantiating the repo from sms_sending_service's package
+    outboxRepo := outboxRepoImpl.NewPgOutboxRepository(dbPool, appLogger) // Pass dbPool and appLogger
 
 	// Initialize Handlers
-	authHandler := httptransport.NewAuthHandler(userSvcClient, appLogger)
-    messageHandler := httptransport.NewMessageHandler(natsClient, outboxRepo, dbPool, appLogger)
+	authHandler := apphttp.NewAuthHandler(userSvcClient, appLogger)
+    messageHandler := apphttp.NewMessageHandler(natsClient, outboxRepo, dbPool, appLogger)
 	// Initialize validator
 	validate := validator.New()
-    incomingHandler := incomingHttp.NewIncomingHandler(natsClient, appLogger, validate)
-    phonebookHandler := httptransport.NewPhonebookHandler(phonebookClient, appLogger, validate)
-	schedulerHandler := httptransport.NewSchedulerHandler(schedulerServiceClient.GetClient(), appLogger, validate)
-	exportHandler := httptransport.NewExportHandler(natsClient, appLogger, validate) // Initialize ExportHandler
+    incomingHandler := apphttp.NewIncomingHandler(natsClient, appLogger, validate)
+    phonebookHandler := apphttp.NewPhonebookHandler(phonebookClient, appLogger, validate)
+	schedulerHandler := apphttp.NewSchedulerHandler(schedulerServiceClient.GetClient(), appLogger, validate)
+	exportHandler := apphttp.NewExportHandler(natsClient, appLogger, validate) // Initialize ExportHandler
 
 
+	// Health check and metrics endpoints
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
         w.Header().Set("Content-Type", "application/json")
         json.NewEncoder(w).Encode(map[string]string{"status": "Public API service is healthy"})
     })
+	r.Handle("/metrics", promhttp.Handler()) // Expose Prometheus metrics
 
 	r.Route("/auth", func(authRouter chi.Router) {
 		authHandler.RegisterRoutes(authRouter)
@@ -148,69 +157,79 @@ func main() {
         messageHandler.RegisterRoutes(msgRouter)
     })
 
-    // Incoming callback routes (typically not authenticated by user JWT, but by IP, secret, or other mechanism)
-    // For now, placing it at the root. Consider if it needs a specific path prefix e.g. /callbacks
-    r.Post("/incoming/receive/{provider_name}", incomingHandler.HandleDLRCallback)
-    r.Post("/incoming/sms/{provider_name}", incomingHandler.HandleIncomingSMSCallback)
-
-    // Phonebook routes (protected)
-    r.Route("/api/v1", func(v1Router chi.Router) { // Using /api/v1 prefix for these resource routes
-        v1Router.Use(authMW)
-        v1Router.Route("/", func(r chi.Router) { // Further nesting if needed, or directly on v1Router
-            phonebookHandler.RegisterRoutes(r) // Register phonebook CRUD routes
-            // Contact routes will be registered on a sub-router like /phonebooks/{phonebookID}/contacts
-
-            // Register Scheduler routes under /api/v1/scheduled_messages
-            r.Route("/scheduled_messages", func(sr chi.Router) {
-                schedulerHandler.RegisterRoutes(sr)
-            })
-
-            // Register Export routes under /api/v1/exports
-            // Example: POST /api/v1/exports/outbox-messages
-            r.Route("/exports", func(er chi.Router) {
-                // Specific endpoint for outbox messages export
-                er.Post("/outbox-messages", exportHandler.RequestExportOutboxMessages)
-                // Add other exportable entities here if needed later
-            })
-        })
+    // Incoming callback routes
+    r.Route("/incoming", func(incomingRouter chi.Router) {
+        // Potentially add IP filtering or other non-JWT auth here if needed
+        incomingRouter.Post("/receive/{provider_name}", incomingHandler.HandleDLRCallback)
+        incomingRouter.Post("/sms/{provider_name}", incomingHandler.HandleIncomingSMSCallback)
     })
 
+    // API v1 routes (protected by JWT Auth by default)
+    r.Route("/api/v1", func(v1Router chi.Router) {
+        v1Router.Use(authMW) // Apply auth middleware to all /api/v1 routes
 
-	r.Group(func(protected chi.Router) {
-		protected.Use(authMW)
-		protected.Get("/users/me", func(w http.ResponseWriter, r *http.Request) {
+        v1Router.Route("/phonebooks", func(pbRouter chi.Router) {
+            phonebookHandler.RegisterRoutes(pbRouter) // Register phonebook CRUD routes
+            // Contact routes would be nested under /phonebooks/{phonebookID}/contacts within phonebookHandler.RegisterRoutes
+        })
+
+        v1Router.Route("/scheduled_messages", func(sr chi.Router) {
+            schedulerHandler.RegisterRoutes(sr)
+        })
+
+        v1Router.Route("/exports", func(er chi.Router) {
+            er.Post("/outbox-messages", exportHandler.RequestExportOutboxMessages)
+        })
+
+        // User profile route (example of another protected route)
+        v1Router.Get("/users/me", func(w http.ResponseWriter, r *http.Request) {
             authUser, ok := r.Context().Value(middleware.AuthenticatedUserContextKey).(middleware.AuthenticatedUser)
             if !ok {
                 appLogger.ErrorContext(r.Context(), "AuthenticatedUser not found in context for /users/me")
                 http.Error(w, "Could not retrieve authenticated user", http.StatusInternalServerError)
                 return
             }
-            profile := httptransport.UserProfileResponse{
+            profile := apphttp.UserProfileResponse{ // Use apphttp alias
                 ID: authUser.ID, Username: authUser.Username, RoleID: authUser.RoleID,
                 IsAdmin: authUser.IsAdmin, IsActive: authUser.IsActive, Permissions: authUser.Permissions,
             }
             w.Header().Set("Content-Type", "application/json")
             json.NewEncoder(w).Encode(profile)
         })
-	})
+    })
+
+
+	// Note: The previous /users/me group is now part of /api/v1
+	// If any routes are truly public (not /auth, not /incoming, not /api/v1), they'd be here.
 
 	httpServer := &http.Server{Addr: fmt.Sprintf(":%d", cfg.PublicAPIServicePort), Handler: r}
-	appLogger.Info(fmt.Sprintf("Public API server listening on port %d", cfg.PublicAPIServicePort))
-    go func() {
+	appLogger.Info("Public API server starting to listen", "address", httpServer.Addr)
+
+	// Start HTTP server in a goroutine
+	go func() {
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			appLogger.Error("HTTP server failed to serve", "error", err)
+			appLogger.Error("HTTP server ListenAndServe failed", "error", err)
+			// Consider this a fatal error for the service if the HTTP server can't run.
+			// For simplicity here, just logging. In a real scenario, might trigger mainCancel().
 		}
 	}()
-	quitChan := make(chan os.Signal, 1)
-	signal.Notify(quitChan, syscall.SIGINT, syscall.SIGTERM)
-	<-quitChan
-	appLogger.Info("Shutdown signal received, shutting down HTTP server...")
-	ctxShutdown, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
+
+	// Graceful shutdown handling
+	stopSignal := make(chan os.Signal, 1)
+	signal.Notify(stopSignal, syscall.SIGINT, syscall.SIGTERM)
+
+	<-stopSignal // Wait for termination signal
+
+	appLogger.Info("Shutdown signal received, initiating graceful shutdown of HTTP server...")
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancelShutdown()
-	if err := httpServer.Shutdown(ctxShutdown); err != nil {
-		appLogger.Error("HTTP server shutdown failed", "error", err)
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		appLogger.Error("HTTP server graceful shutdown failed", "error", err)
 	} else {
 		appLogger.Info("HTTP server shut down gracefully.")
 	}
+
 	appLogger.Info("Public API service shut down.")
 }

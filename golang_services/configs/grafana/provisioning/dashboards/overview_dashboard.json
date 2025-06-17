@@ -1,0 +1,126 @@
+{
+  "uid": "arad-sms-overview-dashboard",
+  "title": "AradSMSServices Overview",
+  "tags": ["aradsms", "overview"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "HTTP Request Rate (Public API)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{job=\"public_api_service\"}[5m])) by (path)",
+          "legendFormat": "{{path}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "HTTP Request Latency P95 (Public API)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"public_api_service\"}[5m])) by (le, path))",
+          "legendFormat": "P95 {{path}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "HTTP Requests by Status Code (Public API)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{job=\"public_api_service\"}[5m])) by (status_code)",
+          "legendFormat": "{{status_code}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}
+    },
+    {
+      "id": 4,
+      "title": "gRPC Request Rate (User Service)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"user_service\"}[5m])) by (grpc_method, grpc_service)",
+          "legendFormat": "{{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+    },
+    {
+      "id": 5,
+      "title": "gRPC Request Latency P95 (User Service)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{job=\"user_service\"}[5m])) by (le, grpc_method, grpc_service))",
+          "legendFormat": "P95 {{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+    },
+    {
+      "id": 6,
+      "title": "gRPC Requests by Status Code (User Service)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"user_service\"}[5m])) by (grpc_code)",
+          "legendFormat": "{{grpc_code}}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"]
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8}
+    }
+  ]
+}

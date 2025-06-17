@@ -34,6 +34,19 @@ services:
       timeout: 5s
       retries: 5
 
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.47.2
+    container_name: aradsms_prometheus_dev
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command: --config.file=/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+    # depends_on: # Typically not needed for Prometheus itself to start
+
   # Grafana
   grafana:
     image: grafana/grafana-oss:latest
@@ -43,10 +56,12 @@ services:
     volumes:
       - grafana_data:/var/lib/grafana
       - ./configs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
-      # - ./configs/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards # For later
+      - ./configs/grafana/provisioning/dashboardproviders:/etc/grafana/provisioning/dashboardproviders
+      - ./configs/grafana/provisioning/dashboards:/var/lib/grafana/dashboards
     restart: unless-stopped
     depends_on:
       - loki
+      - prometheus # Grafana will also use Prometheus as a datasource
 
   # Loki - Log Aggregation
   loki:
@@ -57,7 +72,7 @@ services:
       - "9096:9096"
     volumes:
       - ./configs/loki/loki-config.yaml:/etc/loki/config.yaml
-      - loki_data:/loki # Persist Loki data using a named volume for /tmp/loki contents
+      - loki_data:/loki
     command: -config.file=/etc/loki/config.yaml
     restart: unless-stopped
 
@@ -68,7 +83,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./configs/promtail/promtail-config.yaml:/etc/promtail/config.yaml
-      - promtail_positions:/tmp # For positions file (matches promtail config)
+      - promtail_positions:/tmp
     command: -config.file=/etc/promtail/config.yaml
     restart: unless-stopped
     depends_on:
@@ -82,6 +97,8 @@ services:
       args:
         SERVICE_NAME: user_service
     container_name: aradsms_user_service_dev
+    labels:
+      - "metrics.scrape=true"
     environment:
       - APP_NAME=user_service
       - APP_LOG_LEVEL=debug
@@ -102,14 +119,16 @@ services:
       args:
         SERVICE_NAME: phonebook_service
     container_name: aradsms_phonebook_service_dev
+    labels:
+      - "metrics.scrape=true"
     ports:
-      - "50052:50052" # Updated port
+      - "50052:50052"
     environment:
       - APP_NAME=phonebook_service
       - APP_LOG_LEVEL=debug
       - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
       - APP_NATS_URL=nats://nats:4222
-      - APP_PHONEBOOK_SERVICE_GRPC_PORT=50052 # Internal port
+      - APP_PHONEBOOK_SERVICE_GRPC_PORT=50052
     depends_on:
       postgres: { condition: service_healthy }
       nats: { condition: service_healthy }
@@ -122,14 +141,16 @@ services:
       args:
         SERVICE_NAME: scheduler_service
     container_name: aradsms_scheduler_service_dev
+    labels:
+      - "metrics.scrape=true"
     ports:
-      - "50053:50053" # Updated port
+      - "50053:50053"
     environment:
       - APP_NAME=scheduler_service
       - APP_LOG_LEVEL=debug
       - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
       - APP_NATS_URL=nats://nats:4222
-      - APP_SCHEDULER_SERVICE_GRPC_PORT=50053 # Internal port
+      - APP_SCHEDULER_SERVICE_GRPC_PORT=50053
       - APP_SCHEDULER_POLLING_INTERVAL=30s
       - APP_SCHEDULER_JOB_BATCH_SIZE=10
     depends_on:
@@ -144,9 +165,11 @@ services:
       args:
         SERVICE_NAME: billing_service
     container_name: aradsms_billing_service_dev
+    labels:
+      - "metrics.scrape=true"
     ports:
-      - "8081:8081" # HTTP port for webhooks
-      - "50055:50055" # gRPC port
+      - "8081:8081"
+      - "50055:50055"
     environment:
       - APP_NAME=billing_service
       - APP_LOG_LEVEL=debug
@@ -168,6 +191,8 @@ services:
       args:
         SERVICE_NAME: public_api_service
     container_name: aradsms_public_api_service_dev
+    labels:
+      - "metrics.scrape=true"
     ports:
       - "8080:8080"
     environment:
@@ -196,6 +221,8 @@ services:
       args:
         SERVICE_NAME: sms_sending_service
     container_name: aradsms_sms_sending_service_dev
+    labels:
+      - "metrics.scrape=true"
     environment:
       - APP_NAME=sms_sending_service
       - APP_LOG_LEVEL=debug
@@ -219,6 +246,8 @@ services:
       args:
         SERVICE_NAME: export_service
     container_name: aradsms_export_service_dev
+    labels:
+      - "metrics.scrape=true"
     environment:
       - APP_NAME=export_service
       - APP_LOG_LEVEL=debug
@@ -239,6 +268,8 @@ services:
       args:
         SERVICE_NAME: delivery_retrieval_service
     container_name: aradsms_delivery_retrieval_service_dev
+    labels:
+      - "metrics.scrape=true"
     environment:
       - APP_NAME=delivery_retrieval_service
       - APP_LOG_LEVEL=debug
@@ -256,6 +287,8 @@ services:
       args:
         SERVICE_NAME: inbound_processor_service
     container_name: aradsms_inbound_processor_service_dev
+    labels:
+      - "metrics.scrape=true"
     environment:
       - APP_NAME=inbound_processor_service
       - APP_LOG_LEVEL=debug
@@ -272,3 +305,4 @@ volumes:
   loki_data:
   promtail_positions:
   exports_volume:
+  prometheus_data: # Added prometheus_data volume

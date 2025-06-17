@@ -7,7 +7,7 @@ type RegisterRequest struct {
 	Password    string `json:"password" validate:"required,min=8,max=100"`
 	FirstName   string `json:"first_name,omitempty"`
 	LastName    string `json:"last_name,omitempty"`
-	PhoneNumber string `json:"phone_number,omitempty"`
+	PhoneNumber string `json:"phone_number,omitempty" validate:"omitempty,min=7,max=20"`
 }
 
 // LoginRequest defines the structure for user login.
