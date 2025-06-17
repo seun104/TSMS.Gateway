@@ -37,24 +37,45 @@ func NewExportService(repo exportDomain.OutboxExportRepository, logger *slog.Log
 // ExportOutboxMessagesToCSV fetches outbox messages for a user and writes them to a CSV file.
 // It returns the full path to the generated CSV file or an error.
 func (s *ExportService) ExportOutboxMessagesToCSV(ctx context.Context, userID uuid.UUID, filters map[string]string) (filePath string, err error) {
+	const exportType = "outbox_csv"
+	timer := prometheus.NewTimer(exportJobProcessingDurationHist.WithLabelValues(exportType))
+	defer timer.ObserveDuration()
+
+	jobStatus := "success" // Assume success initially
+	var rowCount int = 0
+
+	// Defer the counter update for job status
+	defer func() {
+		exportJobsProcessedCounter.WithLabelValues(exportType, jobStatus).Inc()
+		if jobStatus == "success" && rowCount > 0 {
+			exportedRowsCounter.WithLabelValues(exportType).Add(float64(rowCount))
+		}
+	}()
+
 	s.logger.InfoContext(ctx, "Starting CSV export for outbox messages", "user_id", userID, "filters", filters)
 
 	messages, err := s.repo.GetOutboxMessagesForUser(ctx, userID, filters)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "Failed to get outbox messages for CSV export", "user_id", userID, "error", err)
+		jobStatus = "error_fetch_data"
 		return "", fmt.Errorf("fetching messages for export failed: %w", err)
 	}
 
-	if len(messages) == 0 {
+	rowCount = len(messages) // Set rowCount here
+
+	if rowCount == 0 {
 		s.logger.InfoContext(ctx, "No outbox messages found for user to export", "user_id", userID)
-		// Depending on requirements, this could be an error or just an empty result.
-		// Returning an empty path and no error indicates no data, but not a system failure.
+		// This is not an error from the system's perspective, but might be a "success_no_data" for metrics.
+		// For now, if no file is produced, it might not be counted as a "success" for job processed if filePath is empty.
+		// Let's consider this a success for processing, but exportedRows will be 0.
+		// The defer func will handle jobStatus="success" and exportedRows=0.
 		return "", nil
 	}
 
 	// Ensure export directory exists
 	if err := os.MkdirAll(s.exportPath, 0750); err != nil { // 0750 permissions: rwxr-x---
 		s.logger.ErrorContext(ctx, "Failed to create export directory", "path", s.exportPath, "error", err)
+		jobStatus = "error_create_dir"
 		return "", fmt.Errorf("could not create export directory: %w", err)
 	}
 
@@ -65,6 +86,7 @@ func (s *ExportService) ExportOutboxMessagesToCSV(ctx context.Context, userID uu
 	file, err := os.Create(fullPath)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "Failed to create CSV export file", "path", fullPath, "error", err)
+		jobStatus = "error_create_file"
 		return "", fmt.Errorf("creating CSV file failed: %w", err)
 	}
 	defer file.Close()
@@ -79,8 +101,8 @@ func (s *ExportService) ExportOutboxMessagesToCSV(ctx context.Context, userID uu
 	}
 	if err := writer.Write(headers); err != nil {
 		s.logger.ErrorContext(ctx, "Failed to write CSV header", "path", fullPath, "error", err)
-		// Attempt to remove partially created file on error
-		_ = os.Remove(fullPath)
+		_ = os.Remove(fullPath) // Attempt to remove partially created file on error
+		jobStatus = "error_write_csv_header"
 		return "", fmt.Errorf("writing CSV header failed: %w", err)
 	}
 
@@ -110,10 +132,12 @@ func (s *ExportService) ExportOutboxMessagesToCSV(ctx context.Context, userID uu
 	if err := writer.Error(); err != nil {
         s.logger.ErrorContext(ctx, "CSV writer error after writing rows", "path", fullPath, "error", err)
         _ = os.Remove(fullPath)
+		jobStatus = "error_write_csv_rows"
         return "", fmt.Errorf("csv writer error: %w", err)
     }
 
-	s.logger.InfoContext(ctx, "Successfully exported outbox messages to CSV", "user_id", userID, "file_path", fullPath, "num_records", len(messages))
+	s.logger.InfoContext(ctx, "Successfully exported outbox messages to CSV", "user_id", userID, "file_path", fullPath, "num_records", rowCount)
+	// jobStatus remains "success" if no errors by this point
 	return fullPath, nil
 }
 

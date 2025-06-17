@@ -8,24 +8,27 @@ import (
 	"syscall"
 	"time"
 	"log/slog" // Added for appLogger
+	"net/http" // For Prometheus metrics server
+	"errors"   // For http.ErrServerClosed
 
-	"github.com/nats-io/nats.go" // pgxpool import removed as it's not directly used in main after db init
+	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/your-repo/project/internal/delivery_retrieval_service/app" // Adjusted path
-	"github.com/your-repo/project/internal/delivery_retrieval_service/repository/postgres" // Import repository implementation
-	// "github.com/your-repo/project/internal/delivery_retrieval_service/adapters/some_adapter"
-	"github.com/your-repo/project/internal/platform/config"
-	"github.com/your-repo/project/internal/platform/database"
-	"github.com/your-repo/project/internal/platform/logger"
-	"github.com/your-repo/project/internal/platform/messagebroker"
+	"github.com/AradIT/aradsms/golang_services/internal/delivery_retrieval_service/app" // Corrected path
+	"github.com/AradIT/aradsms/golang_services/internal/delivery_retrieval_service/repository/postgres" // Corrected path
+	// "github.com/AradIT/aradsms/golang_services/internal/delivery_retrieval_service/adapters/some_adapter" // Corrected path
+	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/database"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/logger"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker"
+	_ "github.com/AradIT/aradsms/golang_services/internal/delivery_retrieval_service/app" // Blank import for promauto metrics
 )
 
 const (
-	serviceName = "delivery_retrieval_service"
-	// startupTimeout = 30 * time.Second // Already part of platform/config or unused directly
-	shutdownTimeout = 10 * time.Second
-	// pollingInterval = 30 * time.Second // How often to poll for DLRs - part of app logic now
+	serviceName         = "delivery_retrieval_service"
+	defaultMetricsPort  = 9096 // Default port for Prometheus metrics
+	shutdownTimeout     = 10 * time.Second
 )
 
 func main() {
@@ -46,11 +49,19 @@ func main() {
 	appLogger = appLogger.With("service", serviceName)
 	appLogger.Info("Starting service...")
 
+	// Determine metrics port
+	metricsPort := cfg.DeliveryRetrievalServiceMetricsPort
+	if metricsPort == 0 {
+		metricsPort = defaultMetricsPort
+		appLogger.Info("Delivery Retrieval service metrics port not configured, using default", "port", metricsPort)
+	}
+
 	// Log Key Configuration Details
 	appLogger.Info("Configuration loaded",
 		"nats_url", cfg.NATSURL,
 		"postgres_dsn_present", cfg.PostgresDSN != "",
 		"log_level", cfg.LogLevel,
+		"metrics_port", metricsPort,
 	)
 
 	// Initialize Database (PostgreSQL)
@@ -111,43 +122,63 @@ func main() {
 		}
 	})
 
-	// Old mock DLRPoller logic is assumed to be removed or commented out as per original file.
-	// If it were active, its logging would also need to use appLogger.
+	// Start Metrics HTTP Server Goroutine
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", metricsPort),
+		Handler: metricsMux,
+	}
+
+	g.Go(func() error {
+		appLogger.Info("Metrics HTTP server starting", "address", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Metrics HTTP server ListenAndServe error", "error", err)
+			return err
+		}
+		appLogger.Info("Metrics HTTP server shut down gracefully.")
+		return nil
+	})
+
+	// Goroutine for handling termination signals
+	g.Go(func() error {
+		stopSignal := make(chan os.Signal, 1)
+		signal.Notify(stopSignal, syscall.SIGINT, syscall.SIGTERM)
+		select {
+		case sig := <-stopSignal:
+			appLogger.Info("Received termination signal", "signal", sig.String())
+			mainCancel() // Initiate shutdown for all components
+			return nil
+		case <-groupCtx.Done(): // If any other goroutine in the group errors out or mainCancel is called
+			return nil // Context already cancelled
+		}
+	})
+
+	// Goroutine for graceful shutdown of the metrics server
+	g.Go(func() error {
+		<-groupCtx.Done() // Wait for cancellation
+		appLogger.Info("Initiating graceful shutdown of Metrics HTTP server...")
+
+		shutdownCtx, cancelMetricsShutdown := context.WithTimeout(context.Background(), 5*time.Second) // Short timeout
+		defer cancelMetricsShutdown()
+
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			appLogger.Error("Metrics HTTP server graceful shutdown failed", "error", err)
+		} else {
+			appLogger.Info("Metrics HTTP server shut down successfully.")
+		}
+		return nil // Error from shutdown is logged, not propagated to errgroup to avoid premature exit if other components are fine.
+	})
+
 
 	appLogger.Info("Service components initialized and workers started. Service is ready.")
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	var groupErr error
-	select {
-	case sig := <-sigCh:
-		appLogger.Info("Received termination signal", "signal", sig.String())
-	case groupErr = <-watchGroup(g):
-		appLogger.Error("A critical component failed, initiating shutdown", "error", groupErr)
+	// Wait for all goroutines in the group to complete
+	if err := g.Wait(); err != nil {
+		// Log errors that are not expected during a graceful shutdown
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Service group encountered an error", "error", err)
+		}
 	}
-
-	appLogger.Info("Attempting graceful shutdown...")
-	mainCancel()
-
-	// shutdownCtx, shutdownCancelTimeout := context.WithTimeout(context.Background(), shutdownTimeout) // This context is not used below
-	// defer shutdownCancelTimeout()
-
-	if err := g.Wait(); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
-		appLogger.Error("Error during graceful shutdown of components", "error", err)
-	} else if groupErr != nil && groupErr != context.Canceled && groupErr != context.DeadlineExceeded {
-		appLogger.Error("Shutdown initiated due to component error", "error", groupErr)
-	}
-
 	appLogger.Info("Service shutdown complete.")
-}
-
-// watchGroup is a helper to monitor an errgroup for early exit.
-// It returns the error that caused the group to exit.
-func watchGroup(g *errgroup.Group) <-chan error {
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- g.Wait()
-	}()
-	return errCh
 }

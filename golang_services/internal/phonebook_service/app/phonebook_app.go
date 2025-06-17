@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/your-repo/project/internal/phonebook_service/domain"
+	"github.com/AradIT/aradsms/golang_services/internal/phonebook_service/domain" // Corrected path
 )
 
 // Application provides an interface for phonebook and contact management operations.

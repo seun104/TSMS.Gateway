@@ -3,17 +3,15 @@
   "title": "AradSMSServices Overview",
   "tags": ["aradsms", "overview"],
   "timezone": "browser",
-  "schemaVersion": 36,
-  "version": 1,
+  "schemaVersion": 37,
+  "version": 2,
+  "refresh": "10s",
   "panels": [
     {
       "id": 1,
       "title": "HTTP Request Rate (Public API)",
       "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
           "expr": "sum(rate(http_requests_total{job=\"public_api_service\"}[5m])) by (path)",
@@ -26,10 +24,7 @@
       "id": 2,
       "title": "HTTP Request Latency P95 (Public API)",
       "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"public_api_service\"}[5m])) by (le, path))",
@@ -42,36 +37,21 @@
       "id": 3,
       "title": "HTTP Requests by Status Code (Public API)",
       "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
           "expr": "sum(rate(http_requests_total{job=\"public_api_service\"}[5m])) by (status_code)",
           "legendFormat": "{{status_code}}"
         }
       ],
-      "options": {
-        "reduceOptions": {
-          "calcs": ["lastNotNull"]
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto" },
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8}
     },
     {
       "id": 4,
       "title": "gRPC Request Rate (User Service)",
       "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
           "expr": "sum(rate(grpc_server_handled_total{job=\"user_service\"}[5m])) by (grpc_method, grpc_service)",
@@ -84,10 +64,7 @@
       "id": 5,
       "title": "gRPC Request Latency P95 (User Service)",
       "type": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
           "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{job=\"user_service\"}[5m])) by (le, grpc_method, grpc_service))",
@@ -100,27 +77,135 @@
       "id": 6,
       "title": "gRPC Requests by Status Code (User Service)",
       "type": "stat",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "Prometheus"
-      },
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
       "targets": [
         {
           "expr": "sum(rate(grpc_server_handled_total{job=\"user_service\"}[5m])) by (grpc_code)",
           "legendFormat": "{{grpc_code}}"
         }
       ],
-      "options": {
-        "reduceOptions": {
-          "calcs": ["lastNotNull"]
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto" },
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8}
+    },
+    {
+      "id": 7,
+      "title": "gRPC Request Rate (Billing Service)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"billing_service\"}[5m])) by (grpc_method, grpc_service)",
+          "legendFormat": "{{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+    },
+    {
+      "id": 8,
+      "title": "gRPC Request Latency P95 (Billing Service)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{job=\"billing_service\"}[5m])) by (le, grpc_method, grpc_service))",
+          "legendFormat": "P95 {{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+    },
+    {
+      "id": 9,
+      "title": "gRPC Requests by Status Code (Billing Service)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"billing_service\"}[5m])) by (grpc_code)",
+          "legendFormat": "{{grpc_code}}"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto" },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 32}
+    },
+    {
+      "id": 10,
+      "title": "gRPC Request Rate (Phonebook Service)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"phonebook_service\"}[5m])) by (grpc_method, grpc_service)",
+          "legendFormat": "{{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40}
+    },
+    {
+      "id": 11,
+      "title": "gRPC Request Latency P95 (Phonebook Service)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{job=\"phonebook_service\"}[5m])) by (le, grpc_method, grpc_service))",
+          "legendFormat": "P95 {{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 40}
+    },
+    {
+      "id": 12,
+      "title": "gRPC Requests by Status Code (Phonebook Service)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"phonebook_service\"}[5m])) by (grpc_code)",
+          "legendFormat": "{{grpc_code}}"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto" },
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 32}
+    },
+    {
+      "id": 13,
+      "title": "gRPC Request Rate (Scheduler Service)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"scheduler_service\"}[5m])) by (grpc_method, grpc_service)",
+          "legendFormat": "{{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 48}
+    },
+    {
+      "id": 14,
+      "title": "gRPC Request Latency P95 (Scheduler Service)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(grpc_server_handling_seconds_bucket{job=\"scheduler_service\"}[5m])) by (le, grpc_method, grpc_service))",
+          "legendFormat": "P95 {{grpc_service}}/{{grpc_method}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 48}
+    },
+    {
+      "id": 15,
+      "title": "gRPC Requests by Status Code (Scheduler Service)",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total{job=\"scheduler_service\"}[5m])) by (grpc_code)",
+          "legendFormat": "{{grpc_code}}"
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "auto", "textMode": "auto", "colorMode": "value", "graphMode": "area", "justifyMode": "auto" },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 56}
     }
   ]
 }

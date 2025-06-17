@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings" // To extract provider name from subject
+	"time"    // For select with timeout on channel send
 
 	"github.com/nats-io/nats.go"
-	"github.com/your-repo/project/internal/inbound_processor_service/domain"
-	"github.com/your-repo/project/internal/platform/messagebroker"
+	"github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/domain" // Corrected path
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker"           // Corrected path
 )
 
 // SMSConsumer is responsible for consuming raw incoming SMS messages from NATS
@@ -42,6 +43,9 @@ func NewSMSConsumer(natsClient *messagebroker.NATSClient, logger *slog.Logger, o
 // This method will block until the context is cancelled or an unrecoverable error occurs during subscription.
 func (c *SMSConsumer) StartConsuming(ctx context.Context, subject string, queueGroup string) error {
 	msgHandler := func(msg *nats.Msg) {
+		// Increment NATS messages received counter using the subscribed subject pattern
+		natsInboundSMSReceivedCounter.WithLabelValues(subject).Inc()
+
 		c.logger.InfoContext(ctx, "Received NATS message", "subject", msg.Subject, "reply", msg.Reply, "data_len", len(msg.Data))
 
 		// Extract provider_name from subject. Example: "sms.incoming.raw.providerX" -> "providerX"
@@ -74,10 +78,18 @@ func (c *SMSConsumer) StartConsuming(ctx context.Context, subject string, queueG
 
 		// Send the deserialized message and provider name to the processing channel
 		// Use a select with context to avoid blocking indefinitely if the channel is full and context is cancelled.
+		// Use a context for the select, possibly derived from the main consumer context
+		// to allow timeout for sending to channel if it's blocked.
+		sendCtx, cancelSend := context.WithTimeout(ctx, 5*time.Second) // Example timeout
+		defer cancelSend()
+
 		select {
 		case c.outputChan <- InboundSMSEvent{ProviderName: providerName, Data: req}:
-			c.logger.DebugContext(ctx, "Sent deserialized SMS to processing channel", "provider_name", providerName, "message_id", req.MessageID)
-		case <-ctx.Done():
+			c.logger.DebugContext(sendCtx, "Sent deserialized SMS to processing channel", "provider_name", providerName, "message_id", req.MessageID)
+		case <-sendCtx.Done(): // If timeout occurs sending to channel
+			c.logger.ErrorContext(sendCtx, "Timed out sending deserialized SMS to processing channel", "error", sendCtx.Err(), "provider_name", providerName, "message_id", req.MessageID)
+			return
+		case <-ctx.Done(): // If main consumer context is cancelled
 			c.logger.InfoContext(ctx, "Context cancelled, not sending SMS to processing channel", "provider_name", providerName, "message_id", req.MessageID)
 			return
 		}

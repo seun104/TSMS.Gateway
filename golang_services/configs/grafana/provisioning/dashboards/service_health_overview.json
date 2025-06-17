@@ -1,0 +1,144 @@
+{
+  "uid": "arad-sms-service-health-overview",
+  "title": "Service Health & Worker Activity Overview",
+  "tags": ["aradsms", "health", "activity"],
+  "timezone": "browser",
+  "schemaVersion": 37,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Service 'up' Status",
+      "type": "table",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "up{job=~\"user_service|public_api_service|billing_service|phonebook_service|scheduler_service|delivery_retrieval_service|export_service|inbound_processor_service|sms_sending_service\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false,
+          "reducer": ["sum"],
+          "fields": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "red", "value": 0},
+              {"color": "green", "value": 1}
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {"text": "Down", "color": "red"},
+                "1": {"text": "Up", "color": "green"}
+              }
+            }
+          ]
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Overall gRPC Request Rate (All Services)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(grpc_server_handled_total[1m])) by (job)",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "Overall gRPC Error Rate % (All Services)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "(sum(rate(grpc_server_handled_total{grpc_code!=\"OK\"}[1m])) by (job) / sum(rate(grpc_server_handled_total[1m])) by (job)) * 100",
+          "legendFormat": "{{job}} error %"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "NATS Messages Received Rate (by Service)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(delivery_retrieval_nats_messages_received_total[1m])) by (job)",
+          "legendFormat": "delivery_retrieval {{subject_pattern}}"
+        },
+        {
+          "expr": "sum(rate(export_nats_requests_received_total[1m])) by (job)",
+          "legendFormat": "export {{subject}}"
+        },
+        {
+          "expr": "sum(rate(inbound_processor_nats_messages_received_total[1m])) by (job)",
+          "legendFormat": "inbound_processor {{subject_pattern}}"
+        },
+        {
+          "expr": "sum(rate(sms_sending_nats_jobs_received_total[1m])) by (job)",
+          "legendFormat": "sms_sending {{subject}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9}
+    },
+    {
+      "id": 5,
+      "title": "Successful Job/Event Processing Rate",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "targets": [
+        {
+          "expr": "sum(rate(scheduler_jobs_processed_total{status=\"success\"}[1m])) by (job, job_type)",
+          "legendFormat": "{{job}} - {{job_type}}"
+        },
+        {
+          "expr": "sum(rate(sms_sending_jobs_processed_total{status=\"success\"}[1m])) by (job, provider_name)",
+          "legendFormat": "{{job}} - {{provider_name}}"
+        },
+        {
+          "expr": "sum(rate(dlr_events_processed_total{status=\"success\"}[1m])) by (job, provider_name)",
+          "legendFormat": "{{job}} (dlr) - {{provider_name}}"
+        },
+        {
+          "expr": "sum(rate(export_jobs_processed_total{status=\"success\"}[1m])) by (job, export_type)",
+          "legendFormat": "{{job}} - {{export_type}}"
+        },
+        {
+          "expr": "sum(rate(inbound_processor_sms_processed_total{status=\"success\"}[1m])) by (job, provider_name)",
+          "legendFormat": "{{job}} (inbound) - {{provider_name}}"
+        }
+      ],
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 17}
+    }
+  ]
+}

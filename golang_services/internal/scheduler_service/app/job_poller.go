@@ -7,9 +7,32 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	"errors" // Added for errors.Is check
 
-	"github.com/your-repo/project/internal/platform/messagebroker"
-	"github.com/your-repo/project/internal/scheduler_service/domain"
+	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker" // Corrected path
+	"github.com/AradIT/aradsms/golang_services/internal/scheduler_service/domain"   // Corrected path
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+)
+
+var (
+	jobsProcessedCounter = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "scheduler",
+			Name:      "jobs_processed_total",
+			Help:      "Total number of jobs processed by the scheduler.",
+		},
+		[]string{"job_type", "status"}, // e.g., job_type="sms", status="success"
+	)
+	jobProcessingDurationHist = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "scheduler",
+			Name:      "job_processing_duration_seconds",
+			Help:      "Duration of job processing.",
+			Buckets:   prometheus.DefBuckets,
+		},
+		[]string{"job_type"},
+	)
 )
 
 // PollerConfig holds configuration specific to the JobPoller.
@@ -66,13 +89,16 @@ func (p *JobPoller) PollAndProcessJobs(ctx context.Context) (processedInLoop int
 
 	for _, job := range acquiredJobs {
 		processedInLoop++
+		timer := prometheus.NewTimer(jobProcessingDurationHist.WithLabelValues(string(job.JobType))) // Cast job.JobType
+		jobStatus := "success" // Assume success initially
+
 		p.logger.InfoContext(ctx, "Processing job", "job_id", job.ID, "job_type", job.JobType, "retry_count", job.RetryCount)
 
 		var processingError error
 		var natsPublishSuccess bool
 
 		switch job.JobType {
-		case "sms":
+		case domain.JobTypeSMS: // Use domain constant
 			var smsPayload domain.SMSJobPayload
 			if err := json.Unmarshal(job.Payload, &smsPayload); err != nil {
 				p.logger.ErrorContext(ctx, "Failed to deserialize SMSJobPayload", "error", err, "job_id", job.ID, "payload", string(job.Payload))
@@ -123,26 +149,31 @@ func (p *JobPoller) PollAndProcessJobs(ctx context.Context) (processedInLoop int
 		if natsPublishSuccess { // For "sms" type, this means success for now
 			err = p.repo.UpdateStatus(ctx, job.ID, domain.StatusCompleted, time.Now().UTC(), sql.NullString{}, 0)
 			if err != nil {
+				jobStatus = "error_update_status_completed" // Specific error status for metrics
 				p.logger.ErrorContext(ctx, "Failed to update job status to Completed", "job_id", job.ID, "update_error", err)
-				// Job was published, but status update failed. This is problematic.
-				// Might need manual intervention or a separate reconciliation process.
 			}
 		} else if processingError != nil { // Handle failures that occurred before or during NATS publish
+			jobStatus = "error_processing"
 			if job.RetryCount < p.config.MaxRetry {
 				nextRetryTime := time.Now().UTC().Add(calculateBackoff(job.RetryCount + 1))
 				p.logger.InfoContext(ctx, "Scheduling job for retry", "job_id", job.ID, "next_retry_at", nextRetryTime, "current_retries", job.RetryCount)
-				err = p.repo.MarkForRetry(ctx, job.ID, nextRetryTime, job.RetryCount, sql.NullString{String: processingError.Error(), Valid: true})
+				err = p.repo.MarkForRetry(ctx, job.ID, nextRetryTime, job.RetryCount+1, sql.NullString{String: processingError.Error(), Valid: true}) // Increment retry count
 				if err != nil {
+					jobStatus = "error_mark_for_retry"
 					p.logger.ErrorContext(ctx, "Failed to mark job for retry", "job_id", job.ID, "update_error", err)
 				}
 			} else {
+				jobStatus = "error_max_retries_reached"
 				p.logger.WarnContext(ctx, "Job failed after max retries", "job_id", job.ID, "error", processingError.Error(), "max_retries", p.config.MaxRetry)
 				err = p.repo.UpdateStatus(ctx, job.ID, domain.StatusFailed, time.Now().UTC(), sql.NullString{String: "Failed after max retries: " + processingError.Error(), Valid: true}, 0)
 				if err != nil {
+					jobStatus = "error_update_status_failed"
 					p.logger.ErrorContext(ctx, "Failed to update job status to Failed after max retries", "job_id", job.ID, "update_error", err)
 				}
 			}
 		}
+		timer.ObserveDuration()
+		jobsProcessedCounter.WithLabelValues(string(job.JobType), jobStatus).Inc()
 	} // end for loop
 
 	return processedInLoop, nil

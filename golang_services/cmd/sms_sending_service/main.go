@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	// "time"
+	"time" // Needed for shutdown timeout
+	"errors" // For http.ErrServerClosed
+	"net/http" // For Prometheus metrics server
 
 	"github.com/AradIT/aradsms/golang_services/api/proto/billingservice"
 	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
@@ -18,6 +20,10 @@ import (
 	appdomain "github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/domain" // Alias to avoid conflict if needed
 	"github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/provider"
 	"github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/repository/postgres"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	// Blank import for promauto metrics registration in app package
+	_ "github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/app"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure" // For dev
@@ -26,6 +32,7 @@ import (
 
 const (
 	serviceName          = "sms-sending-service"
+	defaultMetricsPort   = 9099 // Default port for Prometheus metrics
 	natsSMSJobSubject    = appdomain.NatsSMSJobSendSubject // Using domain const
 	natsSMSJobQueueGroup = appdomain.NatsSMSJobSendQueueGroup // Using domain const
 )
@@ -45,12 +52,20 @@ func main() {
 	appLogger.Info("SMS Sending Service starting...")
 
 	// Log Key Configuration Details
+	// Determine metrics port
+	metricsPort := cfg.SMSSendingServiceMetricsPort
+	if metricsPort == 0 {
+		metricsPort = defaultMetricsPort
+		appLogger.Info("SMS Sending service metrics port not configured, using default", "port", metricsPort)
+	}
+
 	appLogger.Info("Configuration loaded",
 		"log_level", cfg.LogLevel,
 		"nats_url", cfg.NATSURL,
 		"postgres_dsn_present", cfg.PostgresDSN != "",
 		"billing_service_target", cfg.BillingServiceGRPCClientTarget,
 		"default_provider", cfg.SMSSendingServiceDefaultProvider,
+		"metrics_port", metricsPort,
 	)
 
 	// Application context for managing component lifecycles
@@ -162,6 +177,24 @@ func main() {
 	}
 	appLogger.Info("NATS consumer started", "subject", natsSMSJobSubject, "queue_group", natsSMSJobQueueGroup)
 
+	// Start Prometheus metrics HTTP server
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", metricsPort),
+		Handler: metricsMux,
+		// BaseContext: func(_ net.Listener) context.Context { return appCtx }, // Optional: make server respect appCtx for cancellation
+	}
+
+	go func() {
+		appLogger.Info("Metrics HTTP server starting", "address", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Metrics HTTP server ListenAndServe error", "error", err)
+			// If metrics server fails, it might be critical depending on requirements.
+			// For now, just log. Could call cancelAppCtx() to trigger wider shutdown.
+		}
+	}()
+
 	// Wait for termination signal
 	quitChan := make(chan os.Signal, 1)
 	signal.Notify(quitChan, syscall.SIGINT, syscall.SIGTERM)
@@ -170,7 +203,17 @@ func main() {
 	appLogger.Info("Shutdown signal received", "signal", receivedSignal.String())
 	appLogger.Info("Attempting graceful shutdown of SMS Sending Service...")
 
-	cancelAppCtx() // Signal appCtx to be done, for components listening to it (like gRPC client if it used appCtx for streams)
+	cancelAppCtx() // Signal appCtx to be done. NATS consumer and gRPC client connections should react.
+
+	// Shutdown metrics server
+	appLogger.Info("Attempting graceful shutdown of Metrics HTTP server...")
+	metricsShutdownCtx, cancelMetricsShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelMetricsShutdown()
+	if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
+		appLogger.Error("Metrics HTTP server graceful shutdown failed", "error", err)
+	} else {
+		appLogger.Info("Metrics HTTP server shut down successfully.")
+	}
 
 	smsAppService.StopConsumingJobs() // Ensure this is idempotent and handles being called after context cancel.
 

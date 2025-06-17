@@ -35,6 +35,9 @@ func NewNATSConsumer(exportService *ExportService, natsClient messagebroker.NATS
 // or func(msg messagebroker.Message) which then extracts ctx, subject, data.
 // For this example, using the simpler func(ctx context.Context, subject string, data []byte) for clarity.
 func (c *NATSConsumer) HandleExportRequest(ctx context.Context, subject string, data []byte) {
+	// Increment NATS messages received counter
+	natsExportRequestsReceived.WithLabelValues(subject).Inc()
+
 	c.logger.InfoContext(ctx, "Received export request on NATS", "subject", subject, "data_len", len(data))
 	var reqEvent exportDomain.ExportRequestEvent
 	if err := json.Unmarshal(data, &reqEvent); err != nil {

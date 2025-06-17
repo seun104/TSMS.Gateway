@@ -10,10 +10,16 @@ import (
 
 	"fmt"
 	"net"
+	"net/http" // For Prometheus metrics server
 	"golang.org/x/sync/errgroup"
 	"errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
+
+	// Prometheus
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 
 	// Platform packages
 	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
@@ -26,10 +32,14 @@ import (
 	grpcadapter "github.com/AradIT/aradsms/golang_services/internal/scheduler_service/adapters/grpc"
 	"github.com/AradIT/aradsms/golang_services/internal/scheduler_service/repository/postgres"
 	pb "github.com/AradIT/aradsms/golang_services/api/proto/schedulerservice"
+
+	// Blank import for promauto metrics registration in app package
+	_ "github.com/AradIT/aradsms/golang_services/internal/scheduler_service/app"
 )
 
 const (
-	serviceName     = "scheduler-service"
+	serviceName         = "scheduler-service"
+	defaultMetricsPort  = 9095 // Default port for Prometheus metrics
 	// startupTimeout  = 30 * time.Second // Unused
 	shutdownTimeout = 15 * time.Second // Standardized
 )
@@ -51,12 +61,20 @@ func main() {
 	appLogger.Info("Starting service...")
 
 	// Log Key Configuration Details
+	// Determine metrics port
+	metricsPort := cfg.SchedulerServiceMetricsPort
+	if metricsPort == 0 {
+		metricsPort = defaultMetricsPort
+		appLogger.Info("Scheduler service metrics port not configured, using default", "port", metricsPort)
+	}
+
 	appLogger.Info("Configuration loaded",
 		"log_level", cfg.LogLevel,
 		"nats_url", cfg.NATSURL,
 		"postgres_dsn_present", cfg.PostgresDSN != "",
 		"grpc_port", cfg.SchedulerServiceGRPCPort,
-		"scheduler_polling_interval", cfg.SchedulerPollingInterval.String(), // Log duration as string
+		"metrics_port", metricsPort,
+		"scheduler_polling_interval", cfg.SchedulerPollingInterval.String(),
 		"scheduler_job_batch_size", cfg.SchedulerJobBatchSize,
 	)
 
@@ -91,11 +109,25 @@ func main() {
 	}
 	jobPoller := app.NewJobPoller(scheduledJobRepo, natsClient, appLogger, pollerCfg)
 
+	jobPoller := app.NewJobPoller(scheduledJobRepo, natsClient, appLogger, pollerCfg)
+
+	// Initialize Prometheus gRPC metrics
+	grpcMetrics := grpcprom.NewServerMetrics(
+		grpcprom.WithServerHandlingTimeHistogram(),
+	)
+	if err := prometheus.DefaultRegisterer.Register(grpcMetrics); err != nil {
+		appLogger.Warn("Failed to register gRPC Prometheus metrics", "error", err)
+	}
+
 	// Initialize gRPC server
 	schedulerServerAdapter := grpcadapter.NewSchedulerServer(scheduledJobRepo, appLogger)
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(grpcMetrics.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(grpcMetrics.StreamServerInterceptor()),
+	)
 	pb.RegisterSchedulerServiceServer(grpcServer, schedulerServerAdapter)
 	reflection.Register(grpcServer)
+	grpcMetrics.InitializeMetrics(grpcServer) // Initialize metrics for the server
 
 	g, groupCtx := errgroup.WithContext(mainCtx)
 
@@ -131,9 +163,38 @@ func main() {
 		return nil
 	})
 
-	// Goroutine for graceful gRPC server shutdown
+	// Start Metrics HTTP Server Goroutine
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", metricsPort),
+		Handler: metricsMux,
+	}
+
+	g.Go(func() error {
+		appLogger.Info("Metrics HTTP server starting", "address", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Metrics HTTP server ListenAndServe error", "error", err)
+			return err
+		}
+		appLogger.Info("Metrics HTTP server shut down gracefully.")
+		return nil
+	})
+
+	// Goroutine for graceful shutdown of servers (gRPC and Metrics)
 	g.Go(func() error {
 		<-groupCtx.Done() // Wait for shutdown signal
+
+		appLogger.Info("Initiating graceful shutdown of Metrics HTTP server...")
+		metricsShutdownCtx, cancelMetricsShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelMetricsShutdown()
+		if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
+			appLogger.Error("Metrics HTTP server graceful shutdown failed", "error", err)
+			// Potentially collect this error if needed
+		} else {
+			appLogger.Info("Metrics HTTP server shut down successfully.")
+		}
+
 		appLogger.Info("Initiating graceful shutdown of gRPC server...")
 		grpcServer.GracefulStop()
 		appLogger.Info("gRPC server has been shut down gracefully.")
@@ -158,7 +219,7 @@ func main() {
 
 	// Wait for all goroutines in the group to complete
 	if err := g.Wait(); err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, grpc.ErrServerStopped) {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, grpc.ErrServerStopped) && !errors.Is(err, http.ErrServerClosed) {
 			appLogger.Error("Service group encountered an error", "error", err)
 		}
 	}

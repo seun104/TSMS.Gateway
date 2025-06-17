@@ -18,11 +18,17 @@ import (
 	"github.com/AradIT/aradsms/golang_services/internal/platform/logger"
 	"github.com/AradIT/aradsms/golang_services/internal/platform/messagebroker"
 	"golang.org/x/sync/errgroup"
+	"net/http" // For Prometheus metrics server
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	// Blank import for promauto metrics registration in app package
+	_ "github.com/AradIT/aradsms/golang_services/internal/export_service/app"
 )
 
 const (
-	serviceName     = "export-service"
-	shutdownTimeout = 15 * time.Second
+	serviceName         = "export-service"
+	defaultMetricsPort  = 9097 // Default port for Prometheus metrics
+	shutdownTimeout     = 15 * time.Second
 )
 
 func main() {
@@ -42,11 +48,19 @@ func main() {
 	appLogger = appLogger.With("service", serviceName)
 	appLogger.Info("Export service starting...")
 
+	// Determine metrics port
+	metricsPort := cfg.ExportServiceMetricsPort
+	if metricsPort == 0 {
+		metricsPort = defaultMetricsPort
+		appLogger.Info("Export service metrics port not configured, using default", "port", metricsPort)
+	}
+
 	// Log essential configuration details
 	appLogger.Info("Configuration loaded",
 		"log_level", cfg.LogLevel,
 		"nats_url", cfg.NATSURL,
 		"export_path_configured", cfg.ExportServiceExportPath != "",
+		"metrics_port", metricsPort,
 	)
 
 	// Determine and create export path
@@ -95,7 +109,7 @@ func main() {
 	g, groupCtx := errgroup.WithContext(mainCtx)
 
 	// Initialize and start NATS Consumer
-	natsConsumer := app.NewNATSConsumer(exportService, natsClient, appLogger)
+	natsConsumer := app.NewNATSConsumer(exportService, natsClient, appLogger) // natsClient is already of type messagebroker.NATSClient
 	g.Go(func() error {
 		appLogger.Info("NATS consumer starting", "subject", exportDomain.NATSExportRequestOutboxV1, "queue_group", "export_workers_queue")
 		// The message handler for NATS client's Subscribe method needs to match its expected signature.
@@ -164,20 +178,50 @@ func main() {
 		return nil
 	})
 
-	// Shutdown goroutine for any long-running components (e.g., NATS client if started)
+	// Start Metrics HTTP Server Goroutine
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", metricsPort),
+		Handler: metricsMux,
+	}
+
+	g.Go(func() error {
+		appLogger.Info("Metrics HTTP server starting", "address", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Metrics HTTP server ListenAndServe error", "error", err)
+			return err
+		}
+		appLogger.Info("Metrics HTTP server shut down gracefully.")
+		return nil
+	})
+
+	// Shutdown goroutine for service components (e.g., metrics server)
 	g.Go(func() error {
 		<-groupCtx.Done() // Wait for mainCancel() or a component failure
 		appLogger.Info("Initiating graceful shutdown of service components...")
-		// Add cleanup for NATS client here when it's added
-		// Example: if natsClient != nil { natsClient.Close() }
+
+		// Shutdown metrics server
+		appLogger.Info("Attempting graceful shutdown of Metrics HTTP server...")
+		metricsShutdownCtx, cancelMetricsShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelMetricsShutdown()
+		if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
+			appLogger.Error("Metrics HTTP server graceful shutdown failed", "error", err)
+		} else {
+			appLogger.Info("Metrics HTTP server shut down successfully.")
+		}
+
+		// Add other component shutdowns here if necessary (e.g. specific NATS client cleanup if not handled by defer)
 		appLogger.Info("Service components shut down.")
 		return nil
 	})
 
 
 	appLogger.Info("Export service is ready and running.")
-	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		appLogger.Error("Service group encountered an error during run", "error", err)
+	if err := g.Wait(); err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Service group encountered an error during run", "error", err)
+		}
 	}
 
 	appLogger.Info("Export service shut down successfully.")

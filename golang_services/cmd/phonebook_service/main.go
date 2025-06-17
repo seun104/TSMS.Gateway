@@ -12,8 +12,14 @@ import (
 
 	"golang.org/x/sync/errgroup"
 	"errors"
+	"net/http" // For Prometheus metrics server
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection" // For gRPC server reflection
+
+	// Prometheus
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 
 	// Platform packages
 	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
@@ -29,7 +35,8 @@ import (
 )
 
 const (
-	serviceName     = "phonebook_service"
+	serviceName         = "phonebook_service"
+	defaultMetricsPort  = 9094 // Default port for Prometheus metrics
 	// startupTimeout  = 30 * time.Second // Unused
 	shutdownTimeout = 15 * time.Second // Standardized shutdown timeout
 )
@@ -51,11 +58,19 @@ func main() {
 	appLogger.Info("Starting service...")
 
 	// Log Key Configuration Details
+	// Determine metrics port
+	metricsPort := cfg.PhonebookServiceMetricsPort
+	if metricsPort == 0 {
+		metricsPort = defaultMetricsPort
+		appLogger.Info("Phonebook service metrics port not configured, using default", "port", metricsPort)
+	}
+
 	appLogger.Info("Configuration loaded",
 		"log_level", cfg.LogLevel,
 		"nats_url", cfg.NATSURL, // Will be empty if not set
 		"postgres_dsn_present", cfg.PostgresDSN != "",
 		"grpc_port", cfg.PhonebookServiceGRPCPort,
+		"metrics_port", metricsPort,
 	)
 
 	// Initialize Database
@@ -88,10 +103,22 @@ func main() {
 	application := phonebookApp.NewApplication(phonebookRepo, contactRepo, appLogger)
 	grpcServerInstance := grpcAdapter.NewGRPCServer(application, appLogger)
 
+	// Initialize Prometheus gRPC metrics
+	grpcMetrics := grpcprom.NewServerMetrics(
+		grpcprom.WithServerHandlingTimeHistogram(),
+	)
+	if err := prometheus.DefaultRegisterer.Register(grpcMetrics); err != nil {
+		appLogger.Warn("Failed to register gRPC Prometheus metrics", "error", err)
+	}
+
 	// Initialize gRPC server
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(grpcMetrics.UnaryServerInterceptor()),
+		grpc.ChainStreamInterceptor(grpcMetrics.StreamServerInterceptor()),
+	)
 	pb.RegisterPhonebookServiceServer(grpcServer, grpcServerInstance)
 	reflection.Register(grpcServer) // Enable server reflection
+	grpcMetrics.InitializeMetrics(grpcServer) // Initialize metrics for the server
 
 	g, groupCtx := errgroup.WithContext(mainCtx)
 
@@ -128,9 +155,38 @@ func main() {
 		}
 	})
 
-	// Goroutine for graceful gRPC server shutdown
+	// Start Metrics HTTP Server Goroutine
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", metricsPort),
+		Handler: metricsMux,
+	}
+
+	g.Go(func() error {
+		appLogger.Info("Metrics HTTP server starting", "address", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Metrics HTTP server ListenAndServe error", "error", err)
+			return err
+		}
+		appLogger.Info("Metrics HTTP server shut down gracefully.")
+		return nil
+	})
+
+	// Goroutine for graceful shutdown of servers (gRPC and Metrics)
 	g.Go(func() error {
 		<-groupCtx.Done() // Wait for shutdown signal (from mainCancel or other error)
+
+		appLogger.Info("Initiating graceful shutdown of Metrics HTTP server...")
+		metricsShutdownCtx, cancelMetricsShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelMetricsShutdown()
+		if err := metricsServer.Shutdown(metricsShutdownCtx); err != nil {
+			appLogger.Error("Metrics HTTP server graceful shutdown failed", "error", err)
+			// Potentially collect this error if needed, e.g., errors.Join
+		} else {
+			appLogger.Info("Metrics HTTP server shut down successfully.")
+		}
+
 		appLogger.Info("Initiating graceful shutdown of gRPC server...")
 		grpcServer.GracefulStop()
 		appLogger.Info("gRPC server has been shut down gracefully.")
@@ -141,9 +197,7 @@ func main() {
 
 	// Wait for all goroutines in the group to complete
 	if err := g.Wait(); err != nil {
-		// Errors other than context.Canceled (which is expected on shutdown) should be logged.
-		// grpc.ErrServerStopped is also expected.
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, grpc.ErrServerStopped) {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, grpc.ErrServerStopped) && !errors.Is(err, http.ErrServerClosed) {
 			appLogger.Error("Service group encountered an error", "error", err)
 		}
 	}

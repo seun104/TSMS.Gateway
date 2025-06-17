@@ -48,6 +48,19 @@ func NewSMSProcessor(
 // ProcessMessage takes an InboundSMSEvent (which contains the raw provider data and provider name),
 // transforms it into a domain.InboxMessage, and saves it to the database.
 func (s *SMSProcessor) ProcessMessage(ctx context.Context, event InboundSMSEvent) error {
+	timer := prometheus.NewTimer(inboundSMSProcessingDurationHist.WithLabelValues(event.ProviderName))
+	defer timer.ObserveDuration()
+
+	jobStatus := "success" // Assume success initially
+	// Defer the counter update for job status
+	defer func() {
+		// Note: if an error occurs before this point (e.g. in privateNumRepo.FindByNumber if it were to return error)
+		// and causes an early return from ProcessMessage, this deferred func would still run.
+		// We need to ensure jobStatus is correctly set upon any error that leads to a non-"success" outcome.
+		// However, the main "processing" is the inboxRepo.Create.
+		inboundSMSProcessedCounter.WithLabelValues(event.ProviderName, jobStatus).Inc()
+	}()
+
 	s.logger.InfoContext(ctx, "Processing message from provider",
 		"provider_name", event.ProviderName,
 		"provider_message_id", event.Data.MessageID,
@@ -115,14 +128,26 @@ func (s *SMSProcessor) ProcessMessage(ctx context.Context, event InboundSMSEvent
 	// Save to database
 	err := s.inboxRepo.Create(ctx, inboxMsg)
 	if err != nil {
+		jobStatus = "error_db_save" // Set status for metrics on DB save error
 		s.logger.ErrorContext(ctx, "Failed to save inbox message to database",
 			"error", err,
 			"inbox_message_id", inboxMsg.ID,
 			"provider_message_id", inboxMsg.ProviderMessageID,
 		)
-		// TODO: Consider retry logic or dead-lettering for certain types of errors.
-		return err
+		return err // Return the error, defer will record the metric
 	}
+
+	// If pnErr occurred but we decided to continue and save, we might want a different metric status.
+	// For now, "success" implies the main operation (saving to inbox) succeeded.
+	// If privateNumRepo.FindByNumber error should be a distinct failure type for metrics:
+	if pnErr != nil {
+		// This would overwrite "success" if Create was successful but FindByNumber failed.
+		// This depends on whether FindByNumber failing should mark the whole processing as "error_priv_num_assoc".
+		// Given current logic continues, we'll consider it a "success" if Create succeeds.
+		// A more granular metric could be added for association success/failure if needed.
+		// For now, we'll stick to jobStatus reflecting the Create operation.
+	}
+
 
 	s.logger.InfoContext(ctx, "Successfully processed and saved inbox message",
 		"inbox_message_id", inboxMsg.ID,

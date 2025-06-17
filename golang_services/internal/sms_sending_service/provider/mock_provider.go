@@ -6,7 +6,9 @@ import (
 	"log/slog" // Or your platform logger
 	"time"
 
+	"github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/app" // For metrics
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // MockSMSProvider is a test implementation of SMSSenderProvider.
@@ -27,6 +29,9 @@ func NewMockSMSProvider(logger *slog.Logger, failSend bool, delay time.Duration)
 
 // Send simulates sending an SMS.
 func (p *MockSMSProvider) Send(ctx context.Context, details SendRequestDetails) (*SendResponseDetails, error) {
+	providerTimer := prometheus.NewTimer(app.SmsProviderRequestDurationHist.WithLabelValues(p.GetName()))
+	defer providerTimer.ObserveDuration()
+
 	p.logger.InfoContext(ctx, "MockSMSProvider: Send called",
 		"internal_message_id", details.InternalMessageID,
 		"sender_id", details.SenderID,

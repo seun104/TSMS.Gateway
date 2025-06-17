@@ -33,11 +33,17 @@ import (
 	"golang.org/x/sync/errgroup"
 	gRPC "google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
+
+	// Prometheus
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	grpcprom "github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus"
 )
 
 const (
-	serviceName     = "billing-service"
-	shutdownTimeout = 15 * time.Second // Shared timeout for graceful shutdown
+	serviceName         = "billing-service"
+	defaultMetricsPort  = 9093               // Default port for Prometheus metrics
+	shutdownTimeout     = 15 * time.Second // Shared timeout for graceful shutdown
 )
 
 // httpLogger is a middleware that logs HTTP requests using slog.
@@ -76,7 +82,19 @@ func main() {
 	}
 	appLogger := logger.New(cfg.LogLevel) // Initialize early
 	appLogger = appLogger.With("service", serviceName) // Add service context to logger
-	appLogger.Info("Billing service starting...", "grpc_port", cfg.BillingServiceGRPCPort, "http_port", cfg.BillingServiceHTTPPort, "log_level", cfg.LogLevel)
+
+	// Determine metrics port
+	metricsPort := cfg.BillingServiceMetricsPort
+	if metricsPort == 0 {
+		metricsPort = defaultMetricsPort
+		appLogger.Info("Billing service metrics port not configured, using default", "port", metricsPort)
+	}
+	appLogger.Info("Billing service starting...",
+		"grpc_port", cfg.BillingServiceGRPCPort,
+		"http_port", cfg.BillingServiceHTTPPort,
+		"metrics_port", metricsPort,
+		"log_level", cfg.LogLevel,
+	)
 
 	dbPool, err := database.NewDBPool(mainCtx, cfg.PostgresDSN, appLogger)
 	if err != nil {
@@ -121,10 +139,27 @@ func main() {
 	g, groupCtx := errgroup.WithContext(mainCtx)
 
 	// --- Start gRPC Server ---
-	grpcServer := gRPC.NewServer()
+	// Initialize Prometheus gRPC metrics
+	grpcMetrics := grpcprom.NewServerMetrics(
+		grpcprom.WithServerHandlingTimeHistogram(),
+	)
+	if err := prometheus.DefaultRegisterer.Register(grpcMetrics); err != nil {
+		// Handle potential error, e.g. if metrics are already registered by another instance in same process.
+		// For this service, it's unlikely unless there's a specific test setup causing it.
+		// If it's a "already registered" error, we might choose to log it and continue,
+		// or treat it as fatal. Let's log and continue for now.
+		appLogger.Warn("Failed to register gRPC Prometheus metrics", "error", err)
+	}
+
+
+	grpcServer := gRPC.NewServer(
+		gRPC.ChainUnaryInterceptor(grpcMetrics.UnaryServerInterceptor()),
+		gRPC.ChainStreamInterceptor(grpcMetrics.StreamServerInterceptor()),
+	)
 	billingGRPCServer := grpcadapter.NewBillingGRPCServer(billingApp, appLogger)
 	billingservice.RegisterBillingServiceInternalServer(grpcServer, billingGRPCServer)
 	reflection.Register(grpcServer)
+	grpcMetrics.InitializeMetrics(grpcServer) // Initialize metrics for the server
 
 	grpcListenAddress := fmt.Sprintf(":%d", cfg.BillingServiceGRPCPort)
 	grpcListener, err := net.Listen("tcp", grpcListenAddress)
@@ -169,6 +204,25 @@ func main() {
 		return nil
 	})
 
+	// --- Start Metrics HTTP Server ---
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{
+		Addr:    fmt.Sprintf(":%d", metricsPort),
+		Handler: metricsMux,
+	}
+
+	g.Go(func() error {
+		appLogger.Info("Metrics HTTP server starting", "address", metricsServer.Addr)
+		if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			appLogger.Error("Metrics HTTP server ListenAndServe error", "error", err)
+			return err
+		}
+		appLogger.Info("Metrics HTTP server shut down gracefully.")
+		return nil
+	})
+
+
 	// --- Graceful Shutdown Handling ---
 	stopSignal := make(chan os.Signal, 1)
 	signal.Notify(stopSignal, syscall.SIGINT, syscall.SIGTERM)
@@ -194,13 +248,22 @@ func main() {
 
 		var shutdownErrors error
 
-		// Shutdown HTTP Server
-		appLogger.Info("Attempting graceful shutdown of HTTP server...")
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			appLogger.Error("HTTP server graceful shutdown failed", "error", err)
-			shutdownErrors = errors.Join(shutdownErrors, fmt.Errorf("http shutdown: %w", err))
+		// Shutdown Metrics Server
+		appLogger.Info("Attempting graceful shutdown of Metrics HTTP server...")
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			appLogger.Error("Metrics HTTP server graceful shutdown failed", "error", err)
+			shutdownErrors = errors.Join(shutdownErrors, fmt.Errorf("metrics http shutdown: %w", err))
 		} else {
-			appLogger.Info("HTTP server shut down successfully.")
+			appLogger.Info("Metrics HTTP server shut down successfully.")
+		}
+
+		// Shutdown Webhook HTTP Server
+		appLogger.Info("Attempting graceful shutdown of Webhook HTTP server...")
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			appLogger.Error("Webhook HTTP server graceful shutdown failed", "error", err)
+			shutdownErrors = errors.Join(shutdownErrors, fmt.Errorf("webhook http shutdown: %w", err))
+		} else {
+			appLogger.Info("Webhook HTTP server shut down successfully.")
 		}
 
 		// Shutdown gRPC Server
@@ -213,11 +276,10 @@ func main() {
 
 
 	appLogger.Info("Billing service is ready and running.")
-	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-		// context.Canceled is expected if shutdown is triggered by signal
-		appLogger.Error("Service group encountered an error", "error", err)
-		// Depending on the error, might want to os.Exit(1) here.
-		// If shutdownErrors from the specific shutdown goroutine is critical, handle that too.
+	if err := g.Wait(); err != nil {
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, gRPC.ErrServerStopped) {
+			appLogger.Error("Service group encountered an error during run/shutdown", "error", err)
+		}
 	}
 
 	appLogger.Info("Billing service shut down successfully.")

@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"time"
 	"log/slog"
+
+	"github.com/AradIT/aradsms/golang_services/internal/sms_sending_service/app" // For metrics
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type MagfaSMSProvider struct {
@@ -73,6 +76,9 @@ type MagfaErrorResponse struct {
 
 
 func (p *MagfaSMSProvider) Send(ctx context.Context, details SendRequestDetails) (*SendResponseDetails, error) {
+	providerTimer := prometheus.NewTimer(app.SmsProviderRequestDurationHist.WithLabelValues(p.GetName()))
+	defer providerTimer.ObserveDuration()
+
 	p.logger.InfoContext(ctx, "MagfaSMSProvider: Send called", "recipient", details.Recipient, "internal_message_id", details.InternalMessageID)
 
 	// Magfa typically expects an array of recipients for a single message body

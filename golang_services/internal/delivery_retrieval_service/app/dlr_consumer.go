@@ -43,6 +43,10 @@ func (c *DLRConsumer) StartConsuming(ctx context.Context, subject string, queueG
 		msgLogger := c.logger.With("nats_subject", msg.Subject)
 		msgLogger.InfoContext(ctx, "Received NATS DLR message", "data_len", len(msg.Data))
 
+		// Increment NATS messages received counter
+		// Using 'subject' (the pattern) as label, not msg.Subject (the specific subject)
+		natsMessagesReceivedCounter.WithLabelValues(subject).Inc()
+
 		subjectParts := strings.Split(msg.Subject, ".")
 		if len(subjectParts) < 3 || subjectParts[0] != "dlr" || subjectParts[1] != "raw" {
 			msgLogger.ErrorContext(ctx, "Invalid NATS subject format for DLR")

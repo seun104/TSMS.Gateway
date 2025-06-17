@@ -1,0 +1,29 @@
+groups:
+  - name: service_availability_alerts
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m # Alert if service is down for 1 minute
+        labels:
+          severity: critical
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: "{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 1 minute."
+
+      - alert: HighAPIErrorRate
+        expr: (sum(rate(http_requests_total{job="public_api_service",status_code=~"5.."}[2m])) by (job) / sum(rate(http_requests_total{job="public_api_service"}[2m])) by (job)) * 100 > 5
+        for: 5m # Alert if 5xx error rate is > 5% for 5 minutes
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API Error Rate on {{ $labels.job }}"
+          description: "{{ $labels.job }} is experiencing an error rate greater than 5% for 5xx errors."
+
+      - alert: HighGRPCErrorRateUserService
+        expr: (sum(rate(grpc_server_handled_total{job="user_service",grpc_code!="OK"}[2m])) by (job) / sum(rate(grpc_server_handled_total{job="user_service"}[2m])) by (job)) * 100 > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High gRPC Error Rate on {{ $labels.job }}"
+          description: "{{ $labels.job }} (user_service) is experiencing a gRPC error rate greater than 5%."

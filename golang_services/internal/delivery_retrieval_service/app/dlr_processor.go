@@ -133,6 +133,12 @@ func normalizeProviderStatus(providerName, providerStatus string, logger *slog.L
 
 // ProcessDLREvent processes a single DLR event received from NATS.
 func (p *DLRProcessor) ProcessDLREvent(ctx context.Context, event DLREvent) error {
+	timer := prometheus.NewTimer(dlrEventProcessingDurationHist.WithLabelValues(event.ProviderName))
+	defer timer.ObserveDuration()
+
+	jobStatus := "success" // Assume success initially
+	var processingErr error // To store the primary error for metric reporting
+
 	p.logger.InfoContext(ctx, "Processing DLR event from NATS",
 		"provider_name", event.ProviderName,
 		"provider_message_id", event.RequestData.ProviderMessageID,
@@ -232,7 +238,7 @@ func (p *DLRProcessor) ProcessDLREvent(ctx context.Context, event DLREvent) erro
 	)
 
 	// If DB update was successful, publish a ProcessedDLREvent
-	if err == nil {
+	if err == nil { // 'err' here is from p.outboxRepo.UpdateStatus
 		processedEvent := domain.ProcessedDLREvent{
 			MessageID:          messageID,
 			Status:             normalizedStatus.String(),
@@ -264,7 +270,18 @@ func (p *DLRProcessor) ProcessDLREvent(ctx context.Context, event DLREvent) erro
 					"subject", natsSubject, "message_id", messageID)
 			}
 		}
+	} else { // This 'err' is from p.outboxRepo.UpdateStatus
+		jobStatus = "error_db_update"
+		processingErr = err // Store the error
 	}
 
-	return nil // Return nil because the primary operation (DB update) was successful.
+	// If an error occurred earlier (e.g., uuid.Parse), it would have returned.
+	// This metric primarily reflects the success/failure of the main processing block (DB update).
+	// If processingErr is still nil but jobStatus was changed by some other logic, it will be recorded.
+	if processingErr != nil && jobStatus == "success" { // Ensure jobStatus is set if processingErr is set
+		jobStatus = "error" // Generic error if not specifically set
+	}
+	dlrEventsProcessedCounter.WithLabelValues(event.ProviderName, jobStatus).Inc()
+
+	return processingErr // Return the primary error encountered
 }

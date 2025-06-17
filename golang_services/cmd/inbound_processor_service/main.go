@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"log/slog" // Keep slog for appLogger
+	"net/http" // For Prometheus metrics server
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+	"errors" // For http.ErrServerClosed
 
 	"golang.org/x/sync/errgroup"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	// Corrected paths for platform packages
 	"github.com/AradIT/aradsms/golang_services/internal/platform/config"
@@ -19,10 +22,14 @@ import (
 	"github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/app" // Import app package
 	_ "github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/domain" // Domain types used via app typically
 	"github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/repository/postgres" // Import repository
+
+	// Blank import for promauto metrics registration in app package
+	_ "github.com/AradIT/aradsms/golang_services/internal/inbound_processor_service/app"
 )
 
 const (
-	serviceName     = "inbound_processor_service"
+	serviceName         = "inbound_processor_service"
+	defaultMetricsPort  = 9098 // Default port for Prometheus metrics
 	// startupTimeout  = 30 * time.Second // Unused in main directly
 	shutdownTimeout = 10 * time.Second
 )
@@ -45,11 +52,19 @@ func main() {
 	appLogger = appLogger.With("service", serviceName)
 	appLogger.Info("Starting service...")
 
+	// Determine metrics port
+	metricsPort := cfg.InboundProcessorServiceMetricsPort
+	if metricsPort == 0 {
+		metricsPort = defaultMetricsPort
+		appLogger.Info("Inbound Processor service metrics port not configured, using default", "port", metricsPort)
+	}
+
 	// Log Key Configuration Details
 	appLogger.Info("Configuration loaded",
 		"log_level", cfg.LogLevel,
 		"nats_url", cfg.NATSURL,
 		"postgres_dsn_present", cfg.PostgresDSN != "",
+		"metrics_port", metricsPort,
 	)
 
 	// Initialize Database (PostgreSQL)
