@@ -1,0 +1,66 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'alertmanager:9093' # Alertmanager default port
+
+# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+rule_files:
+  - "/etc/prometheus/alert_rules.yml" # Path inside Prometheus container
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'aradsms_services'
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 30s
+    relabel_configs:
+      # Filter to keep only containers that are part of the current Docker Compose project
+      - source_labels: [__meta_docker_container_label_com_docker_compose_project]
+        action: keep
+        regex: 'golang_services' # Name of the docker-compose project (directory name by default)
+
+      # Replace address with container name and its main private port for scraping
+      # This assumes the service exposes /metrics on its main port.
+      # This might need adjustment if services use a dedicated metrics port.
+      - source_labels: [__meta_docker_container_label_com_docker_compose_service, __meta_docker_port_private]
+        action: replace
+        regex: ([^;]+);(\d+) # Capture service name and its first private port
+        replacement: ${1}:${2} # Results in "service_name:port"
+        target_label: __address__
+        # Example: if public_api_service exposes port 8080, __address__ becomes public_api_service:8080
+
+      # Keep only our Go application services (based on typical naming convention)
+      # This regex should match the container names of the Go services.
+      - source_labels: [__meta_docker_container_name]
+        action: keep
+        regex: '/aradsms_([a-zA-Z0-9_]+)_service_dev' # Matches container names like /aradsms_user_service_dev
+
+      # Set 'job' label from the service name part of the container name
+      - source_labels: [__meta_docker_container_name]
+        regex: '/aradsms_([a-zA-Z0-9_]+)_service_dev'
+        replacement: '${1}' # Extracts 'user_service', 'public_api_service', etc.
+        target_label: job
+
+      # Set 'instance' label from the full container name (stripping leading slash)
+      - source_labels: [__meta_docker_container_name]
+        regex: '/?(.*)'
+        target_label: instance
+
+      # Set 'service' label also from the service name part (for consistency with Loki labels)
+      - source_labels: [__meta_docker_container_name]
+        regex: '/aradsms_([a-zA-Z0-9_]+)_service_dev'
+        replacement: '${1}'
+        target_label: service
+
+      # Define the metrics path for all matched targets
+      - target_label: __metrics_path__
+        replacement: /metrics

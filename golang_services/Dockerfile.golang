@@ -1,0 +1,45 @@
+# Dockerfile for Go Services
+
+# ---- Builder Stage ----
+FROM golang:1.21-alpine AS builder
+
+# Argument to specify the service name to build
+ARG SERVICE_NAME
+
+WORKDIR /app
+
+# Copy go.mod and go.sum first to leverage Docker cache
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the entire project source code
+# This allows building any service specified by SERVICE_NAME
+COPY . .
+
+# Build the specified service
+# The output binary will be in /app/bin/${SERVICE_NAME}
+RUN echo "Building service: ${SERVICE_NAME}" && \
+    mkdir -p /app/bin && \
+    CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o /app/bin/${SERVICE_NAME} ./cmd/${SERVICE_NAME}/main.go
+
+# ---- Runtime Stage ----
+FROM alpine:latest
+
+ARG SERVICE_NAME
+
+WORKDIR /app
+
+# Copy the binary from the builder stage
+COPY --from=builder /app/bin/${SERVICE_NAME} /app/
+# Copy configuration files if they are structured to be at a general path
+# Or handle configuration via environment variables primarily
+COPY ./configs /app/configs
+
+# Expose port if the service is HTTP-based (optional, depends on service)
+# EXPOSE 8080
+
+# Environment variable for the application name (can be overridden in docker-compose)
+ENV APP_NAME=${SERVICE_NAME}
+
+# Command to run the service
+CMD ["/app/${SERVICE_NAME}"]

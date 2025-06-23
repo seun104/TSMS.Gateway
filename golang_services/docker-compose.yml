@@ -1,0 +1,338 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: aradsms_postgres_dev
+    environment:
+      POSTGRES_USER: smsuser
+      POSTGRES_PASSWORD: smspassword
+      POSTGRES_DB: sms_gateway_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smsuser -d sms_gateway_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  nats:
+    image: nats:2.9-alpine
+    container_name: aradsms_nats_dev
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+      - "6222:6222"
+    command: "-js"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nats server check"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  alertmanager:
+    image: prom/alertmanager:v0.26.0
+    container_name: aradsms_alertmanager_dev
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./configs/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml
+      - alertmanager_data:/alertmanager
+    command: --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.47.2
+    container_name: aradsms_prometheus_dev
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./configs/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml # Mount alert rules
+      - prometheus_data:/prometheus
+    command: --config.file=/etc/prometheus/prometheus.yml
+    restart: unless-stopped
+    depends_on:
+      - alertmanager # Prometheus depends on Alertmanager
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: aradsms_grafana_dev
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./configs/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+      - ./configs/grafana/provisioning/dashboardproviders:/etc/grafana/provisioning/dashboardproviders
+      - ./configs/grafana/provisioning/dashboards:/var/lib/grafana/dashboards
+    restart: unless-stopped
+    depends_on:
+      - loki
+      - prometheus
+
+  loki:
+    image: grafana/loki:2.9.2
+    container_name: aradsms_loki_dev
+    ports:
+      - "3100:3100"
+      - "9096:9096"
+    volumes:
+      - ./configs/loki/loki-config.yaml:/etc/loki/config.yaml
+      - loki_data:/loki
+    command: -config.file=/etc/loki/config.yaml
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.2
+    container_name: aradsms_promtail_dev
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./configs/promtail/promtail-config.yaml:/etc/promtail/config.yaml
+      - promtail_positions:/tmp
+    command: -config.file=/etc/promtail/config.yaml
+    restart: unless-stopped
+    depends_on:
+      - loki
+
+  # --- Arad SMS Go Services ---
+  user_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: user_service
+    container_name: aradsms_user_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=user_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_USER_SERVICE_GRPC_PORT=50051
+      - APP_USER_SERVICE_METRICS_PORT=9092
+    ports:
+      - "50051:50051"
+      - "9092:9092"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  phonebook_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: phonebook_service
+    container_name: aradsms_phonebook_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=phonebook_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_PHONEBOOK_SERVICE_GRPC_PORT=50052
+      - APP_PHONEBOOK_SERVICE_METRICS_PORT=9094
+    ports: # Corrected to single ports section
+      - "50052:50052"
+      - "9094:9094"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  scheduler_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: scheduler_service
+    container_name: aradsms_scheduler_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=scheduler_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_SCHEDULER_SERVICE_GRPC_PORT=50053
+      - APP_SCHEDULER_SERVICE_METRICS_PORT=9095
+      - APP_SCHEDULER_POLLING_INTERVAL=30s
+      - APP_SCHEDULER_JOB_BATCH_SIZE=10
+    ports: # Corrected to single ports section
+      - "50053:50053"
+      - "9095:9095"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  billing_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: billing_service
+    container_name: aradsms_billing_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=billing_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_BILLING_SERVICE_GRPC_PORT=50055
+      - APP_BILLING_SERVICE_HTTP_PORT=8081
+      - APP_BILLING_SERVICE_METRICS_PORT=9093
+      - APP_USER_SERVICE_GRPC_CLIENT_TARGET=user_service:50051
+    ports: # Corrected to single ports section
+      - "8081:8081"
+      - "50055:50055"
+      - "9093:9093"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      user_service: { condition: service_started }
+    restart: unless-stopped
+
+  public_api_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: public_api_service
+    container_name: aradsms_public_api_service_dev
+    labels:
+      - "metrics.scrape=true"
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_NAME=public_api_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_PUBLIC_API_HTTP_PORT=8080
+      - APP_USER_SERVICE_GRPC_CLIENT_TARGET=user_service:50051
+      - APP_PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET=phonebook_service:50052
+      - APP_SCHEDULER_SERVICE_GRPC_CLIENT_TARGET=scheduler_service:50053
+      - APP_BILLING_SERVICE_GRPC_CLIENT_TARGET=billing_service:50055
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      user_service: { condition: service_started }
+      phonebook_service: { condition: service_started }
+      scheduler_service: { condition: service_started }
+      billing_service: { condition: service_started }
+    restart: unless-stopped
+
+  sms_sending_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: sms_sending_service
+    container_name: aradsms_sms_sending_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=sms_sending_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_BILLING_SERVICE_GRPC_CLIENT_TARGET=billing_service:50055
+      - APP_SMS_SENDING_SERVICE_DEFAULT_PROVIDER=mock
+      - APP_SMS_SENDING_SERVICE_METRICS_PORT=9099
+      - APP_MAGFA_PROVIDER_API_URL=
+      - APP_MAGFA_PROVIDER_API_KEY=
+      - APP_MAGFA_PROVIDER_SENDER_ID=
+    ports:
+      - "9099:9099"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      billing_service: { condition: service_started }
+    restart: unless-stopped
+
+  export_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: export_service
+    container_name: aradsms_export_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=export_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_EXPORT_SERVICE_EXPORT_PATH=/app/exports
+      - APP_EXPORT_SERVICE_METRICS_PORT=9097
+    ports:
+      - "9097:9097"
+    volumes:
+      - exports_volume:/app/exports
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  delivery_retrieval_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: delivery_retrieval_service
+    container_name: aradsms_delivery_retrieval_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=delivery_retrieval_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_DELIVERY_RETRIEVAL_SERVICE_METRICS_PORT=9096
+    ports:
+      - "9096:9096"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+  inbound_processor_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.golang
+      args:
+        SERVICE_NAME: inbound_processor_service
+    container_name: aradsms_inbound_processor_service_dev
+    labels:
+      - "metrics.scrape=true"
+    environment:
+      - APP_NAME=inbound_processor_service
+      - APP_LOG_LEVEL=debug
+      - APP_POSTGRES_DSN=postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable
+      - APP_NATS_URL=nats://nats:4222
+      - APP_INBOUND_PROCESSOR_SERVICE_METRICS_PORT=9098
+    ports:
+      - "9098:9098"
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  grafana_data:
+  loki_data:
+  promtail_positions:
+  exports_volume:
+  prometheus_data:
+  alertmanager_data: # Added alertmanager_data volume

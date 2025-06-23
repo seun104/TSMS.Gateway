@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package smsservice;
+
+option go_package = "github.com/aradsms/golang_services/api/proto/smsservice"; // Adjust to your go module path
+
+import "google/protobuf/timestamp.proto";
+
+// Reusing MessageStatus from core_domain, but proto needs its own enum or string.
+// For simplicity, using string here. Could define a parallel enum.
+// Alternatively, the Go enum core_domain.MessageStatus would be mapped to string/int by the handler.
+
+message OutboxMessageProto {
+    string id = 1;
+    string user_id = 2;
+    string batch_id = 3;
+    string sender_id_text = 4;
+    string private_number_id = 5;
+    string recipient = 6;
+    string content = 7; // May be omitted for status checks for privacy/brevity
+    string status = 8; // e.g., "queued", "sent", "delivered"
+    int32 segments = 9;
+    string provider_message_id = 10;
+    string provider_status_code = 11;
+    string error_message = 12;
+    string user_data = 13;
+    google.protobuf.Timestamp scheduled_for = 14;
+    google.protobuf.Timestamp processed_at = 15;
+    google.protobuf.Timestamp sent_at = 16;
+    google.protobuf.Timestamp delivered_at = 17;
+    google.protobuf.Timestamp last_status_update_at = 18;
+    google.protobuf.Timestamp created_at = 19;
+    google.protobuf.Timestamp updated_at = 20;
+    string sms_provider_id = 21;
+    string route_id = 22;
+}
+
+message GetOutboxMessageStatusRequest {
+    string message_id = 1;
+    // string user_id = 2; // Optional: for authorization, to ensure user can only query their own messages
+}
+
+message GetOutboxMessageStatusResponse {
+    OutboxMessageProto message = 1;
+}
+
+service SmsQueryServiceInternal {
+    rpc GetOutboxMessageStatus(GetOutboxMessageStatusRequest) returns (GetOutboxMessageStatusResponse);
+    // Could add ListOutboxMessages RPC here too
+}

@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package schedulerservice;
+
+option go_package = "github.com/AradIT/Arad.SMS.Gateway/golang_services/api/proto/schedulerservice";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/empty.proto";
+
+message ScheduledMessage {
+  string id = 1;
+  string job_type = 2; // e.g., "sms", "email"
+  map<string, string> payload = 3; // JSON or specific message
+  google.protobuf.Timestamp schedule_time = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  string status = 7; // e.g., "pending", "processing", "completed", "failed"
+  string user_id = 8;
+}
+
+message CreateScheduledMessageRequest {
+  string job_type = 1;
+  map<string, string> payload = 2;
+  google.protobuf.Timestamp schedule_time = 3;
+  string user_id = 4;
+}
+
+message GetScheduledMessageRequest {
+  string id = 1;
+}
+
+message ListScheduledMessagesRequest {
+  int32 page_size = 1;
+  int32 page_number = 2;
+  string user_id = 3; // Optional: filter by user
+  string status = 4; // Optional: filter by status
+  string job_type = 5; // Optional: filter by job_type
+}
+
+message ListScheduledMessagesResponse {
+  repeated ScheduledMessage messages = 1;
+  int32 total_count = 2;
+}
+
+message UpdateScheduledMessageRequest {
+  string id = 1;
+  map<string, string> payload = 2;
+  google.protobuf.Timestamp schedule_time = 3;
+  string status = 4;
+}
+
+message DeleteScheduledMessageRequest {
+  string id = 1;
+}
+
+service SchedulerService {
+  rpc CreateScheduledMessage(CreateScheduledMessageRequest) returns (ScheduledMessage);
+  rpc GetScheduledMessage(GetScheduledMessageRequest) returns (ScheduledMessage);
+  rpc ListScheduledMessages(ListScheduledMessagesRequest) returns (ListScheduledMessagesResponse);
+  rpc UpdateScheduledMessage(UpdateScheduledMessageRequest) returns (ScheduledMessage);
+  rpc DeleteScheduledMessage(DeleteScheduledMessageRequest) returns (google.protobuf.Empty);
+}

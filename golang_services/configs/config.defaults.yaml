@@ -1,0 +1,42 @@
+# Default application configuration
+LOG_LEVEL: "info"
+POSTGRES_DSN: "postgres://smsuser:smspassword@postgres:5432/sms_gateway_db?sslmode=disable"
+NATS_URL: "nats://nats:4222"
+
+# User Service
+USER_SERVICE_GRPC_PORT: 50051
+JWT_ACCESS_SECRET: "your_very_secret_access_key_env_override_in_prod_12345"
+JWT_REFRESH_SECRET: "your_very_secret_refresh_key_env_override_in_prod_67890"
+JWT_ACCESS_EXPIRY_HOURS: 1
+JWT_REFRESH_EXPIRY_HOURS: 720
+
+# Public API Service
+PUBLIC_API_SERVICE_PORT: 8080
+USER_SERVICE_GRPC_CLIENT_TARGET: "user-service:50051"
+
+# Billing Service
+BILLING_SERVICE_GRPC_PORT: 50052
+BILLING_SERVICE_GRPC_CLIENT_TARGET: "billing-service:50052" # Added (use Docker Compose service name)
+
+# Phonebook Service
+PHONEBOOK_SERVICE_GRPC_PORT: 50051 # Actual internal port phonebook-service listens on (as per its docker-compose APP_GRPC_PORT)
+PHONEBOOK_SERVICE_GRPC_CLIENT_TARGET: "phonebook-service:50051" # public-api connects to this
+# The host port mapping in phonebook-service's docker-compose (e.g., "50054:50051") is for external access to the service,
+# not for inter-service communication within the Docker network.
+
+# Scheduler Service
+SCHEDULER_POLLING_INTERVAL: "60s" # How often the scheduler polls for due jobs
+SCHEDULER_JOB_BATCH_SIZE: 10      # Max number of jobs to acquire in one poll cycle
+SCHEDULER_MAX_RETRY: 3            # Max number of retries for a failed job
+SCHEDULER_SERVICE_GRPC_CLIENT_TARGET: "scheduler-service:50053" # Target for scheduler service gRPC
+
+# SMS Sending Service
+SMS_SENDING_SERVICE_DEFAULT_PROVIDER: "mock" # or "magfa" once implemented
+
+# Magfa SMS Provider (example)
+MAGFA_PROVIDER_API_URL: "https_magfa_api_url_here"
+MAGFA_PROVIDER_API_KEY: "your_magfa_api_key_here"
+MAGFA_PROVIDER_SENDER_ID: "your_magfa_sender_id_here"
+
+# Billing Service Specific
+BILLING_SERVICE_HTTP_PORT: 8081 # Port for webhook HTTP server

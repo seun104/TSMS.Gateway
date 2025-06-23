@@ -1,0 +1,123 @@
+# Placeholder for CI/CD Pipeline Configuration
+# This is a generic example. Syntax will vary based on your CI/CD provider
+# (e.g., GitHub Actions, GitLab CI, Jenkinsfile, CircleCI config.yml).
+
+name: Go Microservice CI/CD
+
+on:
+  push:
+    branches:
+      - main # Or your main development branch
+      - go-rewrite # Or the specific feature branch
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Test and Lint
+    runs-on: ubuntu-latest # Or your preferred runner
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v4 # Example for GitHub Actions
+        with:
+          go-version: '1.21' # Match your project's Go version
+
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Install Linters
+        run: |
+          # Example: Install golangci-lint
+          # curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v1.55.2
+          echo "TODO: Install linters (e.g., golangci-lint)"
+        working-directory: ./golang_services # Adjust if go.mod is elsewhere
+
+      - name: Run Linters
+        run: |
+          # Example: golangci-lint run ./...
+          echo "TODO: Run linters (e.g., golangci-lint run ./...)"
+        working-directory: ./golang_services
+
+      - name: Run Unit Tests
+        run: |
+          # go test -v ./... -coverprofile=coverage.out
+          echo "TODO: Run unit tests (e.g., go test -v ./...)"
+        working-directory: ./golang_services
+
+      # - name: Upload Coverage Report
+      #   uses: codecov/codecov-action@v3 # Example for Codecov
+      #   with:
+      // #   file: ./golang_services/coverage.out
+
+  build:
+    name: Build Services
+    runs-on: ubuntu-latest
+    needs: test # Run build only if tests pass
+    strategy:
+      matrix:
+        service: [user_service] # Add other services here: [user_service, sms_sending_service, ...]
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Build Go Binary for ${{ matrix.service }}
+        run: |
+          # cd cmd/${{ matrix.service }} && go build -o ../../bin/${{ matrix.service }} .
+          echo "TODO: Build Go binary for ${{ matrix.service }} (e.g., cd cmd/${{ matrix.service }} && go build -o ../../bin/${{ matrix.service }} .)"
+        working-directory: ./golang_services
+
+      # - name: Upload Artifact (Binary)
+      #   uses: actions/upload-artifact@v3
+      #   with:
+      #     name: ${{ matrix.service }}-binary
+      // # path: ./golang_services/bin/${{ matrix.service }}
+
+  # Placeholder for Docker build and push
+  # build_and_push_docker:
+  #   name: Build and Push Docker Image
+  #   runs-on: ubuntu-latest
+  #   needs: build
+  #   if: github.ref == 'refs/heads/main' # Example: Only run on merges to main
+  #   strategy:
+  // # matrix:
+  // # service: [user_service] # Add other services
+  #   steps:
+  #     - name: Check out code
+  #       uses: actions/checkout@v3
+  #
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v2
+  #
+  #     - name: Log in to Docker Hub (or other registry)
+  #       uses: docker/login-action@v2
+  #       with:
+  // # username: ${{ secrets.DOCKER_USERNAME }}
+  // # password: ${{ secrets.DOCKER_PASSWORD }}
+  #
+  #     - name: Build and push Docker image for ${{ matrix.service }}
+  #       uses: docker/build-push-action@v4
+  #       with:
+  #         context: ./golang_services # Or path to service if Dockerfile is there
+  // # file: ./golang_services/cmd/${{ matrix.service }}/Dockerfile
+  // # push: true
+  // # tags: yourdockerhubuser/${{ matrix.service }}:latest, yourdockerhubuser/${{ matrix.service }}:${{ github.sha }}
+
+  # Placeholder for Deployment job
+  # deploy_staging:
+  #   name: Deploy to Staging
+  #   runs-on: ubuntu-latest
+  #   needs: build_and_push_docker # Or just 'build' if not pushing images from CI directly
+  #   if: github.ref == 'refs/heads/main' # Example condition
+  #   environment: staging
+  #   steps:
+  #     - name: Deploy to Kubernetes (Staging)
+  #       run: |
+  #         echo "TODO: Implement deployment script for staging (e.g., using kubectl, Helm, kustomize)"
+  #         # Example: kubectl apply -f k8s/staging/${{ matrix.service }}/deployment.yaml
+  #         # Ensure KUBECONFIG is set up for the staging cluster

@@ -1,0 +1,29 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: aradsms_services
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+        # Filters can be added here if needed, e.g., to only include containers with a specific label
+        # For now, it will discover all containers on the Docker host.
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: 'compose_service'
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/?(.*)' # Strip leading slash if present
+        target_label: 'container'
+      # Use the compose_service name as the 'service' label for Loki
+      - source_labels: ['compose_service']
+        target_label: 'service'
+      # Add a 'job' label, also from compose_service for consistency with Prometheus conventions
+      - source_labels: ['compose_service']
+        target_label: 'job'

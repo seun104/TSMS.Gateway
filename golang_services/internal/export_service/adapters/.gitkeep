@@ -1,0 +1,2 @@
+# This file is intentionally left blank to ensure the directory is tracked by Git.
+# Adapters for the export service (e.g., NATS consumer, file storage adapters) will go here.

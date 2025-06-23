@@ -1,0 +1,25 @@
+global:
+  resolve_timeout: 5m # How long to wait before declaring an alert instance resolved if it stops firing
+
+route:
+  receiver: 'default-receiver' # Default receiver if no other match
+  group_by: ['alertname', 'job'] # Group alerts by alertname and job
+  group_wait: 30s           # How long to wait before sending a notification for a new group
+  group_interval: 5m        # How long to wait before sending notifications for the same group again
+  repeat_interval: 1h       # How long to wait before re-sending a notification for the same alert if it's still firing
+
+receivers:
+  - name: 'default-receiver'
+    # Placeholder - in a real setup, configure email, Slack, PagerDuty, etc.
+    # For this setup, we'll use a webhook that just logs to stdout or a simple log file if possible
+    # or simply have it defined but not actively sending to external systems.
+    # A common practice for local dev is to use a tool like 'alertmanager-webhook-logger'
+    # or just have a null receiver for syntax validation.
+    # For simplicity, we'll define a webhook receiver that won't point to a running service.
+    webhook_configs:
+      - url: 'http://localhost:5001/webhook' # Dummy URL, will likely fail but config is valid
+        send_resolved: true
+
+# Templates for notifications (optional for basic setup)
+# templates:
+# - '/etc/alertmanager/template/*.tmpl'
